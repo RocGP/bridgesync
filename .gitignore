@@ -1,0 +1,19 @@
+# Backups contain PLAINTEXT SECRETS (Claude tokens, SSH private keys, etc.) — never commit
+backups/
+*.zip
+
+# Runtime working dirs
+temp/
+uploads/
+
+# Dependencies
+node_modules/
+
+# Restore artifacts
+**/pre-restore-*/
+BridgeSync-MIGRATION-NOTES.txt
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log

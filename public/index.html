@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BridgeSync - Claude 与编辑器 备份迁移面板</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="logo-area">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 18l6-6-6-6M8 6L2 12l6 6"></path>
+          </svg>
+        </div>
+        <div class="logo-text">
+          <h1>BridgeSync</h1>
+          <span>V1.0 迁移中心</span>
+        </div>
+      </div>
+
+      <nav class="nav-links">
+        <a href="#dashboard" class="nav-item active" data-tab="dashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>
+          总览
+        </a>
+        <a href="#backup" class="nav-item" data-tab="backup">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"></path></svg>
+          备份
+        </a>
+        <a href="#restore" class="nav-item" data-tab="restore">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>
+          还原
+        </a>
+        <a href="#logs" class="nav-item" data-tab="logs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17h16M4 12h16M4 7h16"></path></svg>
+          运行日志
+          <span class="pulse-indicator"></span>
+        </a>
+      </nav>
+
+      <div class="system-status">
+        <div class="status-indicator online"></div>
+        <div class="status-info">
+          <span class="status-label">主机状态</span>
+          <span class="status-value" id="system-os-name">扫描中…</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace Content -->
+    <main class="main-content">
+      <!-- Header -->
+      <header class="top-header">
+        <div class="header-title">
+          <h2 id="page-title">迁移总览</h2>
+          <p id="page-desc">系统配置状态与环境检测。</p>
+        </div>
+        <div class="user-badge">
+          <div class="avatar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+          </div>
+          <div class="user-details">
+            <span class="username" id="system-user-name">用户</span>
+            <span class="host" id="system-host-name">本机</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- TAB Content Container -->
+      <div class="tab-viewport">
+
+        <!-- DASHBOARD TAB -->
+        <section id="tab-dashboard" class="tab-pane active">
+          <div class="stats-grid">
+
+            <!-- Claude Card -->
+            <div class="glass-card stat-card glow-blue">
+              <div class="card-header">
+                <h3>Claude Code 状态</h3>
+                <div class="card-icon blue">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12A10 10 0 0 1 12 2z"></path><path d="M12 6v6l4 2"></path></svg>
+                </div>
+              </div>
+              <div class="stat-value" id="dash-claude-size">0.00 MB</div>
+              <div class="stat-details">
+                <div class="detail-item">
+                  <span class="lbl">已扫描项目</span>
+                  <span class="val" id="dash-claude-projects">0</span>
+                </div>
+                <div class="detail-item">
+                  <span class="lbl">会话数</span>
+                  <span class="val" id="dash-claude-sessions">0</span>
+                </div>
+              </div>
+              <div class="card-status-bar" id="dash-claude-status">已检测</div>
+            </div>
+
+            <!-- VS Code Settings Card -->
+            <div class="glass-card stat-card glow-violet">
+              <div class="card-header">
+                <h3>VS Code 配置</h3>
+                <div class="card-icon violet">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2 12 22"></polygon></svg>
+                </div>
+              </div>
+              <div class="stat-value" id="dash-vscode-size">0.00 MB</div>
+              <div class="stat-details">
+                <div class="detail-item">
+                  <span class="lbl">设置同步</span>
+                  <span class="val">可用</span>
+                </div>
+                <div class="detail-item">
+                  <span class="lbl">自定义代码片段</span>
+                  <span class="val" id="dash-vscode-snippets">已启用</span>
+                </div>
+              </div>
+              <div class="card-status-bar" id="dash-vscode-status">已检测</div>
+            </div>
+
+            <!-- Antigravity / Gemini Card -->
+            <div class="glass-card stat-card glow-blue">
+              <div class="card-header">
+                <h3>Antigravity / Gemini CLI</h3>
+                <div class="card-icon blue">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                </div>
+              </div>
+              <div class="stat-value" id="dash-gemini-size">0.00 MB</div>
+              <div class="stat-details">
+                <div class="detail-item">
+                  <span class="lbl">对话历史</span>
+                  <span class="val">保留</span>
+                </div>
+                <div class="detail-item">
+                  <span class="lbl">Agent 记忆</span>
+                  <span class="val">保留</span>
+                </div>
+              </div>
+              <div class="card-status-bar" id="dash-gemini-status">已检测</div>
+            </div>
+
+            <!-- VS Code Extensions Card -->
+            <div class="glass-card stat-card glow-cyan">
+              <div class="card-header">
+                <h3>扩展列表</h3>
+                <div class="card-icon cyan">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                </div>
+              </div>
+              <div class="stat-value" id="dash-extensions-count">0</div>
+              <div class="stat-details">
+                <div class="detail-item">
+                  <span class="lbl">VS Code 扩展</span>
+                  <span class="val" id="dash-extensions-status">已加载</span>
+                </div>
+              </div>
+              <button class="card-action-btn" id="btn-view-extensions">查看扩展</button>
+            </div>
+
+          </div>
+
+          <!-- Bottom Visualizations -->
+          <div class="dashboard-bottom">
+            <div class="glass-card chart-card flex-2">
+              <h3>配置体积占比</h3>
+              <div class="chart-container">
+                <svg viewBox="0 0 400 200" id="size-donut-chart">
+                  <!-- Dynamic SVG Chart Content -->
+                  <circle cx="100" cy="100" r="70" fill="none" stroke="#161b33" stroke-width="20" />
+                  <circle cx="100" cy="100" r="70" fill="none" stroke="url(#blue-gradient)" stroke-dasharray="440" stroke-dashoffset="110" stroke-width="20" id="chart-claude-segment" />
+                  <circle cx="100" cy="100" r="70" fill="none" stroke="url(#violet-gradient)" stroke-dasharray="440" stroke-dashoffset="330" stroke-width="20" id="chart-vscode-segment" />
+                  <circle cx="100" cy="100" r="70" fill="none" stroke="url(#pink-gradient)" stroke-dasharray="440" stroke-dashoffset="440" stroke-width="20" id="chart-gemini-segment" />
+
+                  <defs>
+                    <linearGradient id="blue-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="#3b82f6" />
+                      <stop offset="100%" stop-color="#06b6d4" />
+                    </linearGradient>
+                    <linearGradient id="violet-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="#8b5cf6" />
+                      <stop offset="100%" stop-color="#ec4899" />
+                    </linearGradient>
+                    <linearGradient id="pink-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="#ec4899" />
+                      <stop offset="100%" stop-color="#f43f5e" />
+                    </linearGradient>
+                  </defs>
+
+                  <!-- Legend -->
+                  <g transform="translate(240, 30)">
+                    <rect x="0" y="0" width="12" height="12" fill="#3b82f6" rx="2" />
+                    <text x="20" y="10" fill="#a0aec0" font-size="12">Claude Code 会话</text>
+                    <text x="20" y="26" fill="#ffffff" font-size="14" font-weight="600" id="legend-claude-val">0.00 MB</text>
+                  </g>
+                  <g transform="translate(240, 85)">
+                    <rect x="0" y="0" width="12" height="12" fill="#8b5cf6" rx="2" />
+                    <text x="20" y="10" fill="#a0aec0" font-size="12">VS Code 设置</text>
+                    <text x="20" y="26" fill="#ffffff" font-size="14" font-weight="600" id="legend-vscode-val">0.00 MB</text>
+                  </g>
+                  <g transform="translate(240, 140)">
+                    <rect x="0" y="0" width="12" height="12" fill="#ec4899" rx="2" />
+                    <text x="20" y="10" fill="#a0aec0" font-size="12">Antigravity / Gemini</text>
+                    <text x="20" y="26" fill="#ffffff" font-size="14" font-weight="600" id="legend-gemini-val">0.00 MB</text>
+                  </g>
+                </svg>
+              </div>
+            </div>
+
+            <div class="glass-card summary-card flex-1">
+              <h3>系统概览</h3>
+              <ul class="system-checklist">
+                <li>
+                  <div class="check-box checked"></div>
+                  <span>已配置 Claude Code CLI</span>
+                </li>
+                <li>
+                  <div class="check-box checked"></div>
+                  <span>已检测到 VS Code 环境</span>
+                </li>
+                <li>
+                  <div class="check-box checked" id="check-cli-accessible"></div>
+                  <span>VS Code 命令行 'code' 可用</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- BACKUP HUB TAB -->
+        <section id="tab-backup" class="tab-pane">
+          <div class="backup-layout">
+            <div class="backup-settings flex-3">
+              <div class="glass-card">
+                <h3>1. 选择要备份的组件</h3>
+                <div class="backup-options-grid">
+
+                  <label class="option-checkbox-card">
+                    <input type="checkbox" id="chk-backup-claude" checked>
+                    <div class="card-content">
+                      <span class="title">Claude Code 环境</span>
+                      <p class="desc">会话历史、设置、记忆文件、MCP 配置（强烈建议勾选）。</p>
+                      <div class="sub-option">
+                        <label>
+                          <input type="checkbox" id="chk-backup-credentials">
+                          含敏感凭证 / 登录令牌
+                        </label>
+                      </div>
+                    </div>
+                  </label>
+
+                  <label class="option-checkbox-card">
+                    <input type="checkbox" id="chk-backup-vscode" checked>
+                    <div class="card-content">
+                      <span class="title">VS Code（设置 + 扩展）</span>
+                      <p class="desc">settings.json、快捷键、代码片段，以及已装扩展清单（还原时自动重装）。</p>
+                    </div>
+                  </label>
+
+                  <label class="option-checkbox-card">
+                    <input type="checkbox" id="chk-backup-antigravity-ide" checked>
+                    <div class="card-content">
+                      <span class="title">Antigravity IDE（编辑器）</span>
+                      <p class="desc">Antigravity IDE 编辑器配置（设置、快捷键、片段、argv）及其扩展清单。VSCode 分支，处理方式同 VS Code。</p>
+                    </div>
+                  </label>
+
+                  <label class="option-checkbox-card">
+                    <input type="checkbox" id="chk-backup-gemini" checked>
+                    <div class="card-content">
+                      <span class="title">Antigravity / Gemini CLI（~/.gemini）</span>
+                      <p class="desc">Agent 偏好、自定义技能、工作流、对话历史、OAuth 配置。（浏览器录制、profile、缓存已自动排除）</p>
+                    </div>
+                  </label>
+
+                  <label class="option-checkbox-card">
+                    <input type="checkbox" id="chk-backup-ssh">
+                    <div class="card-content">
+                      <span class="title">SSH 密钥（~/.ssh）</span>
+                      <p class="desc">私钥/公钥与 known_hosts。含敏感信息——请妥善保管压缩包。还原时不会覆盖已存在的密钥。</p>
+                    </div>
+                  </label>
+
+                  <label class="option-checkbox-card">
+                    <input type="checkbox" id="chk-backup-gitconfig" checked>
+                    <div class="card-content">
+                      <span class="title">全局 .gitconfig</span>
+                      <p class="desc">全局 git 身份与别名。若目标机已有 .gitconfig，还原时跳过。</p>
+                    </div>
+                  </label>
+
+                </div>
+              </div>
+
+              <!-- Workspaces Folder Picker -->
+              <div class="glass-card spacing-top">
+                <div class="card-header-actions">
+                  <h3>2. 加入项目工作区目录</h3>
+                  <p class="desc">把你的源码目录一起打包。node_modules、.git、.codegraph 等重型目录会自动排除以节省空间。</p>
+                </div>
+
+                <div class="add-workspace-box">
+                  <input type="text" id="txt-workspace-path" placeholder="例如 d:\projects\my-web-app">
+                  <button class="primary-btn" id="btn-add-workspace">扫描并添加目录</button>
+                </div>
+
+                <div class="workspaces-table-wrapper">
+                  <table class="workspaces-table" id="workspaces-table">
+                    <thead>
+                      <tr>
+                        <th>工作区路径</th>
+                        <th>文件数</th>
+                        <th>扫描体积</th>
+                        <th width="80">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="workspaces-list">
+                      <tr class="empty-row">
+                        <td colspan="4">尚未添加工作区。在上方输入目录路径以打包。</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Action column -->
+            <div class="backup-actions flex-1">
+              <div class="glass-card sticky-card">
+                <h3>执行备份</h3>
+                <div class="total-estimated-size">
+                  <span class="lbl">预计总体积</span>
+                  <span class="val" id="backup-total-size">0.00 MB</span>
+                </div>
+                <button class="cta-btn spacing-top" id="btn-execute-backup">
+                  生成备份压缩包
+                </button>
+                <div class="action-note">
+                  压缩包将保存到：<code id="lbl-backup-dest">./backups/</code>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- RESTORE HUB TAB -->
+        <section id="tab-restore" class="tab-pane">
+          <div class="restore-layout">
+
+            <div class="restore-upload-box glass-card" id="restore-dropzone">
+              <div class="upload-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"></path></svg>
+              </div>
+              <h3>拖入备份文件（.zip）</h3>
+              <p>或点击此处从电脑选择文件</p>
+              <input type="file" id="file-restore-upload" style="display: none;" accept=".zip">
+            </div>
+
+            <!-- Configurator which appears after upload -->
+            <div id="restore-configurator" style="display: none;" class="spacing-top">
+              <div class="restore-grid">
+
+                <div class="glass-card flex-2">
+                  <h3>备份信息</h3>
+                  <div class="metadata-table">
+                    <div class="meta-row"><span class="lbl">创建时间：</span><span class="val" id="restore-meta-date">-</span></div>
+                    <div class="meta-row"><span class="lbl">来源系统：</span><span class="val" id="restore-meta-os">-</span></div>
+                    <div class="meta-row"><span class="lbl">来源主机：</span><span class="val" id="restore-meta-host">-</span></div>
+                    <div class="meta-row"><span class="lbl">来源用户：</span><span class="val" id="restore-meta-user">-</span></div>
+                  </div>
+
+                  <h3 class="spacing-top">路径映射</h3>
+                  <p class="desc text-warning">
+                    请确认目录映射正确。Claude Code 会话与记忆里的路径引用会自动改写指向新路径。若新机路径与旧机相同，保持原值即可。
+                  </p>
+
+                  <div class="mapping-table-wrapper">
+                    <table class="mapping-table">
+                      <thead>
+                        <tr>
+                          <th>组件 / 原路径</th>
+                          <th>还原动作 / 映射到的目标路径</th>
+                        </tr>
+                      </thead>
+                      <tbody id="path-mappings-list">
+                        <!-- Filled dynamically -->
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div class="glass-card flex-1 sticky-card">
+                  <h3>还原内容</h3>
+
+                  <ul class="restore-details-checklist" id="restore-checklist">
+                    <li id="item-restore-claude">
+                      <div class="dot checked"></div>
+                      <span>Claude 会话与历史</span>
+                    </li>
+                    <li id="item-restore-editors">
+                      <div class="dot checked"></div>
+                      <span>编辑器与扩展（<span id="restore-ext-count">0</span>）</span>
+                    </li>
+                    <li id="item-restore-gemini">
+                      <div class="dot checked"></div>
+                      <span>Antigravity / Gemini CLI 配置</span>
+                    </li>
+                    <li id="item-restore-ssh">
+                      <div class="dot checked"></div>
+                      <span>SSH 密钥（跳过已存在）</span>
+                    </li>
+                    <li id="item-restore-gitconfig">
+                      <div class="dot checked"></div>
+                      <span>全局 .gitconfig</span>
+                    </li>
+                  </ul>
+                  <p class="desc" style="margin-top:10px; color:#64748b; font-size:12px;">
+                    非破坏式：目标机现有配置会先快照到 <code>./backups/pre-restore-*</code>，绝不覆盖；JSON 采用合并、你的现有值优先。
+                  </p>
+
+                  <button class="cta-btn bg-success spacing-top" id="btn-execute-restore">
+                    开始还原
+                  </button>
+                </div>
+
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- TERMINAL LOG TAB -->
+        <section id="tab-logs" class="tab-pane">
+          <div class="terminal-container glass-card">
+            <div class="terminal-header">
+              <div class="terminal-dots">
+                <span class="dot-red"></span>
+                <span class="dot-yellow"></span>
+                <span class="dot-green"></span>
+              </div>
+              <div class="terminal-title">BridgeSync 进程终端</div>
+              <button class="terminal-clear" id="btn-clear-terminal">清空日志</button>
+            </div>
+            <div class="terminal-body" id="terminal-console">
+              <div class="term-line system">等待进程初始化…</div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Extensions Modal -->
+  <div class="modal" id="extensions-modal">
+    <div class="modal-content glass-card">
+      <div class="modal-header">
+        <h3>已安装的 VS Code 扩展</h3>
+        <button class="close-btn" id="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <ul class="extensions-list" id="modal-extensions-list">
+          <!-- Filled dynamically -->
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
