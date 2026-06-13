@@ -1,46 +1,37 @@
-// Global application state
+// 全局状态
 const state = {
-  os: '',
-  hostname: '',
-  username: '',
-  claude: null,
-  vscode: null,
-  gemini: null,
+  os: '', hostname: '', username: '', home: '',
+  tools: [],
   addedWorkspaces: [],
   activeUploadManifest: null
 };
 
-// Initialize app when DOM loaded
+const CATEGORY_LABEL = {
+  editor: '编辑器',
+  extension: '扩展型 Agent',
+  cli: 'CLI Agent',
+  standalone: '独立编辑器',
+  keys: '密钥 / 配置'
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   initTabs();
   connectSSE();
   detectEnvironment();
   initBackupTab();
   initRestoreTab();
-  initModals();
 });
 
-// Real-time terminal connection via Server-Sent Events (SSE)
+// ---------------------------------------------------------------------------
+// SSE 终端
+// ---------------------------------------------------------------------------
 function connectSSE() {
   const consoleEl = document.getElementById('terminal-console');
   const pulseEl = document.querySelector('.pulse-indicator');
-  const eventSource = new EventSource('/api/logs');
-
-  eventSource.onopen = () => {
-    pulseEl.style.display = 'block';
-  };
-
-  eventSource.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    appendTerminalLine(data.message, data.type);
-  };
-
-  eventSource.onerror = (err) => {
-    console.error('SSE connection error:', err);
-    pulseEl.style.display = 'none';
-  };
-
-  // Clear console action
+  const es = new EventSource('/api/logs');
+  es.onopen = () => { pulseEl.style.display = 'block'; };
+  es.onmessage = (e) => { const d = JSON.parse(e.data); appendTerminalLine(d.message, d.type); };
+  es.onerror = () => { pulseEl.style.display = 'none'; };
   document.getElementById('btn-clear-terminal').addEventListener('click', () => {
     consoleEl.innerHTML = '<div class="term-line system">日志已清空。</div>';
   });
@@ -55,596 +46,341 @@ function appendTerminalLine(text, type = 'info') {
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-// Tab navigation handler
+// ---------------------------------------------------------------------------
+// 标签页
+// ---------------------------------------------------------------------------
 function initTabs() {
   const navItems = document.querySelectorAll('.nav-item');
   const panes = document.querySelectorAll('.tab-pane');
   const pageTitle = document.getElementById('page-title');
   const pageDesc = document.getElementById('page-desc');
-
   const tabInfo = {
-    dashboard: { title: '迁移总览', desc: '系统配置状态与环境检测。' },
-    backup: { title: '备份', desc: '打包压缩配置、设置与项目目录。' },
+    dashboard: { title: '迁移总览', desc: '检测本机已安装的 AI 工具与配置。' },
+    backup: { title: '备份', desc: '打包压缩配置、会话与项目目录。' },
     restore: { title: '还原', desc: '解包备份、自动重装扩展、映射工作区路径。' },
     logs: { title: '运行日志', desc: '系统与任务过程的实时输出。' }
   };
-
   navItems.forEach(item => {
     item.addEventListener('click', (e) => {
       e.preventDefault();
       const tabId = item.getAttribute('data-tab');
-
-      // Update Nav Class
       navItems.forEach(n => n.classList.remove('active'));
       item.classList.add('active');
-
-      // Update Panes
       panes.forEach(p => p.classList.remove('active'));
       document.getElementById(`tab-${tabId}`).classList.add('active');
-
-      // Update Header
-      if (tabInfo[tabId]) {
-        pageTitle.textContent = tabInfo[tabId].title;
-        pageDesc.textContent = tabInfo[tabId].desc;
-      }
+      if (tabInfo[tabId]) { pageTitle.textContent = tabInfo[tabId].title; pageDesc.textContent = tabInfo[tabId].desc; }
     });
   });
 }
 
-// Switch to a specific tab programmatically
 function switchTab(tabId) {
-  const tabBtn = document.querySelector(`.nav-item[data-tab="${tabId}"]`);
-  if (tabBtn) tabBtn.click();
+  const btn = document.querySelector(`.nav-item[data-tab="${tabId}"]`);
+  if (btn) btn.click();
 }
 
-// Fetch environment settings
+// ---------------------------------------------------------------------------
+// 环境检测
+// ---------------------------------------------------------------------------
 async function detectEnvironment() {
   try {
-    appendTerminalLine('正在扫描主机配置环境…', 'system');
+    appendTerminalLine('正在扫描本机 AI 工具…', 'system');
     const res = await fetch('/api/detect');
     const data = await res.json();
+    state.os = data.os; state.hostname = data.hostname; state.username = data.username; state.home = data.home;
+    state.tools = data.tools || [];
 
-    state.os = data.os;
-    state.hostname = data.hostname;
-    state.username = data.username;
-    state.home = data.home;
-    state.claude = data.claude;
-    state.vscode = data.vscode;
-    state.editors = data.editors || [];
-    state.gemini = data.gemini;
- 
-    // Populate Sidebar
     document.getElementById('system-os-name').textContent = `${data.os} (${data.hostname})`;
     document.getElementById('system-user-name').textContent = data.username;
     document.getElementById('system-host-name').textContent = data.hostname;
- 
-    // Populate Dashboard
-    if (data.claude.exists) {
-      document.getElementById('dash-claude-size').textContent = formatBytes(data.claude.size);
-      document.getElementById('dash-claude-projects').textContent = data.claude.projects.length;
-      document.getElementById('dash-claude-sessions').textContent = data.claude.sessionsCount;
-    } else {
-      document.getElementById('dash-claude-size').textContent = '未找到';
-      document.getElementById('dash-claude-status').textContent = '未启用';
-      document.getElementById('dash-claude-status').style.color = '#ef4444';
-    }
 
-    if (data.vscode.exists) {
-      document.getElementById('dash-vscode-size').textContent = formatBytes(data.vscode.size);
-    } else {
-      document.getElementById('dash-vscode-size').textContent = '未找到';
-      document.getElementById('dash-vscode-status').textContent = '未启用';
-      document.getElementById('dash-vscode-status').style.color = '#ef4444';
-    }
-
-    if (data.gemini.exists) {
-      document.getElementById('dash-gemini-size').textContent = formatBytes(data.gemini.size);
-    } else {
-      document.getElementById('dash-gemini-size').textContent = '未找到';
-      document.getElementById('dash-gemini-status').textContent = '未启用';
-      document.getElementById('dash-gemini-status').style.color = '#ef4444';
-    }
-
-    document.getElementById('dash-extensions-count').textContent = data.vscode.extensionsCount;
-
-    // Check code accessibility
-    const cliCheck = document.getElementById('check-cli-accessible');
-    if (data.vscode.extensionsCount > 0) {
-      cliCheck.classList.add('checked');
-      cliCheck.nextElementSibling.textContent = "VS Code 命令行 'code' 可用";
-    } else {
-      cliCheck.classList.remove('checked');
-      cliCheck.nextElementSibling.textContent = "VS Code 命令行 'code' 不可用";
-    }
-
-    updateDashboardChart();
+    renderDashboard();
+    renderBackupTools();
     recalculateTotalBackupSize();
-    appendTerminalLine('环境扫描完成。', 'success');
-
+    const n = state.tools.filter(t => t.exists).length;
+    appendTerminalLine(`扫描完成，检测到 ${n} 个工具。`, 'success');
   } catch (e) {
-    appendTerminalLine(`环境扫描失败：${e.message}`, 'error');
+    appendTerminalLine(`扫描失败：${e.message}`, 'error');
   }
 }
 
-// Update the SVG Donut chart
-function updateDashboardChart() {
-  const claudeSize = state.claude ? state.claude.size : 0;
-  const vscodeSize = state.vscode ? state.vscode.size : 0;
-  const geminiSize = state.gemini ? state.gemini.size : 0;
-  const total = claudeSize + vscodeSize + geminiSize;
- 
-  document.getElementById('legend-claude-val').textContent = formatBytes(claudeSize);
-  document.getElementById('legend-vscode-val').textContent = formatBytes(vscodeSize);
-  document.getElementById('legend-gemini-val').textContent = formatBytes(geminiSize);
- 
-  const claudeSeg = document.getElementById('chart-claude-segment');
-  const vscodeSeg = document.getElementById('chart-vscode-segment');
-  const geminiSeg = document.getElementById('chart-gemini-segment');
- 
-  if (total === 0) {
-    claudeSeg.style.strokeDashoffset = '440';
-    vscodeSeg.style.strokeDashoffset = '440';
-    geminiSeg.style.strokeDashoffset = '440';
+function detectedTools() { return state.tools.filter(t => t.exists); }
+
+// ---------------------------------------------------------------------------
+// 仪表盘：按检测结果渲染卡片
+// ---------------------------------------------------------------------------
+function renderDashboard() {
+  const grid = document.getElementById('dashboard-tools');
+  const tools = detectedTools();
+  grid.innerHTML = '';
+  if (!tools.length) {
+    grid.innerHTML = '<div class="glass-card stat-card"><div class="stat-value">未检测到工具</div></div>';
     return;
   }
- 
-  const claudePct = claudeSize / total;
-  const vscodePct = vscodeSize / total;
-  const geminiPct = geminiSize / total;
- 
-  const circumference = 440; // 2 * pi * r (r=70)
-  
-  // Calculate offsets
-  const claudeOffset = circumference * (1 - claudePct);
-  const vscodeOffset = circumference * (1 - vscodePct);
-  const geminiOffset = circumference * (1 - geminiPct);
-
-  const vscodeRotate = claudePct * 360;
-  const geminiRotate = (claudePct + vscodePct) * 360;
- 
-  claudeSeg.style.strokeDashoffset = claudeOffset;
-  
-  vscodeSeg.style.strokeDashoffset = vscodeOffset;
-  vscodeSeg.setAttribute('transform', `rotate(${vscodeRotate} 100 100)`);
-
-  geminiSeg.style.strokeDashoffset = geminiOffset;
-  geminiSeg.setAttribute('transform', `rotate(${geminiRotate} 100 100)`);
+  tools.forEach(t => {
+    const card = document.createElement('div');
+    card.className = 'glass-card stat-card glow-blue';
+    const ext = t.extCount ? `<div class="detail-item"><span class="lbl">扩展数</span><span class="val">${t.extCount}</span></div>` : '';
+    card.innerHTML = `
+      <div class="card-header">
+        <h3>${escapeHtml(t.name)} ${t.secret ? '🔒' : ''}</h3>
+      </div>
+      <div class="stat-value">${formatBytes(t.size)}</div>
+      <div class="stat-details">
+        <div class="detail-item"><span class="lbl">类型</span><span class="val">${CATEGORY_LABEL[t.category] || t.category}</span></div>
+        ${ext}
+      </div>
+      <div class="card-status-bar">已检测</div>`;
+    grid.appendChild(card);
+  });
 }
 
-// Recalculate total estimated backup size
+// ---------------------------------------------------------------------------
+// 备份：动态勾选项
+// ---------------------------------------------------------------------------
+function renderBackupTools() {
+  const wrap = document.getElementById('backup-tools-list');
+  const tools = detectedTools();
+  wrap.innerHTML = '';
+  if (!tools.length) { wrap.innerHTML = '<div class="empty-row">未检测到任何可备份的工具。</div>'; return; }
+
+  // 按类别分组
+  const groups = {};
+  tools.forEach(t => { (groups[t.category] = groups[t.category] || []).push(t); });
+
+  Object.keys(groups).forEach(cat => {
+    const header = document.createElement('div');
+    header.className = 'group-header';
+    header.textContent = CATEGORY_LABEL[cat] || cat;
+    header.style.cssText = 'grid-column:1/-1; color:#94a3b8; font-size:12px; font-weight:600; margin:6px 0 2px;';
+    wrap.appendChild(header);
+
+    groups[cat].forEach(t => {
+      const label = document.createElement('label');
+      label.className = 'option-checkbox-card';
+      const sizeStr = formatBytes(t.size);
+      const extStr = t.extCount ? ` · ${t.extCount} 扩展` : '';
+      label.innerHTML = `
+        <input type="checkbox" class="chk-tool" value="${escapeHtml(t.id)}" ${t.secret ? '' : 'checked'}>
+        <div class="card-content">
+          <span class="title">${escapeHtml(t.name)} ${t.secret ? '🔒' : ''}</span>
+          <p class="desc">${sizeStr}${extStr}${t.secret ? ' · 含私密数据，默认不勾选' : ''}</p>
+        </div>`;
+      label.querySelector('input').addEventListener('change', recalculateTotalBackupSize);
+      wrap.appendChild(label);
+    });
+  });
+}
+
+function checkedToolIds() {
+  return Array.from(document.querySelectorAll('.chk-tool:checked')).map(i => i.value);
+}
+
 function recalculateTotalBackupSize() {
   let size = 0;
-
-  const editorSize = (id) => {
-    const e = (state.editors || []).find(x => x.id === id);
-    return e ? e.size : 0;
-  };
-
-  // Add checked options
-  if (document.getElementById('chk-backup-claude').checked && state.claude) {
-    size += state.claude.size;
-  }
-  if (document.getElementById('chk-backup-vscode').checked) {
-    size += editorSize('vscode');
-  }
-  if (document.getElementById('chk-backup-antigravity-ide').checked) {
-    size += editorSize('antigravity-ide');
-  }
-  if (document.getElementById('chk-backup-gemini').checked && state.gemini) {
-    size += state.gemini.size;
-  }
-
-  // Add custom workspaces
-  state.addedWorkspaces.forEach(w => {
-    size += w.size;
-  });
-
-  document.getElementById('backup-total-size').textContent = formatBytes(size);
+  const ids = new Set(checkedToolIds());
+  state.tools.forEach(t => { if (ids.has(t.id)) size += t.size; });
+  state.addedWorkspaces.forEach(w => { size += w.size; });
+  const el = document.getElementById('backup-total-size');
+  if (el) el.textContent = formatBytes(size);
 }
 
-// Setup backup tab UI elements
 function initBackupTab() {
   const addBtn = document.getElementById('btn-add-workspace');
   const pathInput = document.getElementById('txt-workspace-path');
   const executeBtn = document.getElementById('btn-execute-backup');
 
-  // Trigger size calculations on options check/uncheck
-  ['chk-backup-claude', 'chk-backup-vscode', 'chk-backup-antigravity-ide', 'chk-backup-gemini', 'chk-backup-ssh', 'chk-backup-gitconfig'].forEach(id => {
-    document.getElementById(id).addEventListener('change', recalculateTotalBackupSize);
-  });
-
-  // Add workspace button
   addBtn.addEventListener('click', async () => {
     const wPath = pathInput.value.trim();
     if (!wPath) return alert('请输入目录路径。');
-
-    addBtn.disabled = true;
-    addBtn.textContent = '扫描中…';
+    addBtn.disabled = true; addBtn.textContent = '扫描中…';
     appendTerminalLine(`正在扫描工作区路径：${wPath}`, 'system');
-
     try {
       const res = await fetch('/api/scan-workspace', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspacePath: wPath })
       });
-
       const data = await res.json();
       if (res.ok) {
-        // Avoid duplicates
-        if (state.addedWorkspaces.find(x => x.path === data.path)) {
-          alert('该工作区已添加。');
-        } else {
+        if (state.addedWorkspaces.find(x => x.path === data.path)) alert('该工作区已添加。');
+        else {
           state.addedWorkspaces.push(data);
-          renderWorkspacesTable();
-          recalculateTotalBackupSize();
-          pathInput.value = '';
+          renderWorkspacesTable(); recalculateTotalBackupSize(); pathInput.value = '';
           appendTerminalLine(`已添加工作区：${data.name}（${formatBytes(data.size)}）`, 'success');
         }
-      } else {
-        alert(`扫描失败：${data.error}`);
-        appendTerminalLine(`工作区扫描错误：${data.error}`, 'error');
-      }
-    } catch (e) {
-      alert(`扫描目录出错：${e.message}`);
-    } finally {
-      addBtn.disabled = false;
-      addBtn.textContent = '扫描并添加目录';
-    }
+      } else { alert(`扫描失败：${data.error}`); appendTerminalLine(`工作区扫描错误：${data.error}`, 'error'); }
+    } catch (e) { alert(`扫描目录出错：${e.message}`); }
+    finally { addBtn.disabled = false; addBtn.textContent = '扫描并添加目录'; }
   });
 
-  // Execute backup button
   executeBtn.addEventListener('click', async () => {
-    const includeEditors = [];
-    if (document.getElementById('chk-backup-vscode').checked) includeEditors.push('vscode');
-    if (document.getElementById('chk-backup-antigravity-ide').checked) includeEditors.push('antigravity-ide');
+    const selectedTools = checkedToolIds();
+    const includeSecrets = document.getElementById('chk-include-secrets').checked;
+    const customWorkspaces = state.addedWorkspaces.map(w => w.path);
+    if (!selectedTools.length && !customWorkspaces.length) return alert('请至少选择一个工具或工作区。');
 
-    const payload = {
-      includeClaude: document.getElementById('chk-backup-claude').checked,
-      includeClaudeCredentials: document.getElementById('chk-backup-credentials').checked,
-      includeEditors,
-      includeGemini: document.getElementById('chk-backup-gemini').checked,
-      includeSSH: document.getElementById('chk-backup-ssh').checked,
-      includeGitconfig: document.getElementById('chk-backup-gitconfig').checked,
-      customWorkspaces: state.addedWorkspaces.map(w => w.path)
-    };
-
-    if (!payload.includeClaude && includeEditors.length === 0 && !payload.includeGemini && !payload.includeSSH && !payload.includeGitconfig && payload.customWorkspaces.length === 0) {
-      return alert('请至少选择一个组件或工作区目录进行备份。');
+    // 是否含私密：勾了 secret 工具 或 勾了 includeSecrets
+    const secretTools = state.tools.filter(t => t.secret && selectedTools.includes(t.id));
+    if (includeSecrets || secretTools.length) {
+      if (!confirm('本次备份将把私密数据（凭证/令牌/SSH 私钥等）以明文打包进 .zip。请确保妥善保管。确认继续？')) return;
     }
 
-    if (document.getElementById('chk-backup-credentials').checked || payload.includeSSH) {
-      if (!confirm('本次备份将把敏感信息（Claude 令牌 和/或 SSH 私钥）以明文形式打包进 .zip。确认继续？')) return;
-    }
-
-    executeBtn.disabled = true;
-    executeBtn.textContent = '备份中…';
-    switchTab('logs');
-
+    executeBtn.disabled = true; executeBtn.textContent = '备份中…'; switchTab('logs');
     try {
       const res = await fetch('/api/backup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectedTools, includeSecrets, customWorkspaces })
       });
       const data = await res.json();
-      if (res.ok) {
-        alert(`备份压缩包已生成！\n文件名：${data.filename}\n体积：${formatBytes(data.size)}`);
-      } else {
-        alert(`备份失败：${data.error}`);
-      }
-    } catch (e) {
-      alert(`备份过程中网络错误：${e.message}`);
-    } finally {
-      executeBtn.disabled = false;
-      executeBtn.textContent = '生成备份压缩包';
-    }
+      if (res.ok) alert(`备份压缩包已生成！\n文件名：${data.filename}\n体积：${formatBytes(data.size)}`);
+      else alert(`备份失败：${data.error}`);
+    } catch (e) { alert(`备份过程中网络错误：${e.message}`); }
+    finally { executeBtn.disabled = false; executeBtn.textContent = '生成备份压缩包'; }
   });
 }
 
 function renderWorkspacesTable() {
   const tbody = document.getElementById('workspaces-list');
   tbody.innerHTML = '';
-
-  if (state.addedWorkspaces.length === 0) {
-    tbody.innerHTML = `
-      <tr class="empty-row">
-        <td colspan="4">尚未添加工作区。在上方输入目录路径以打包。</td>
-      </tr>
-    `;
+  if (!state.addedWorkspaces.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="4">尚未添加工作区。</td></tr>';
     return;
   }
-
-  state.addedWorkspaces.forEach((w, index) => {
+  state.addedWorkspaces.forEach((w, idx) => {
     const tr = document.createElement('tr');
-    
-    const tdPath = document.createElement('td');
-    tdPath.textContent = w.path;
-    tr.appendChild(tdPath);
-
-    const tdCount = document.createElement('td');
-    tdCount.textContent = w.files;
-    tr.appendChild(tdCount);
-
-    const tdSize = document.createElement('td');
-    tdSize.textContent = formatBytes(w.size);
-    tr.appendChild(tdSize);
-
+    const tdPath = document.createElement('td'); tdPath.textContent = w.path; tr.appendChild(tdPath);
+    const tdCount = document.createElement('td'); tdCount.textContent = w.files; tr.appendChild(tdCount);
+    const tdSize = document.createElement('td'); tdSize.textContent = formatBytes(w.size); tr.appendChild(tdSize);
     const tdAction = document.createElement('td');
-    const delBtn = document.createElement('button');
-    delBtn.className = 'delete-btn';
-    delBtn.textContent = '删除';
-    delBtn.addEventListener('click', () => {
-      state.addedWorkspaces.splice(index, 1);
-      renderWorkspacesTable();
-      recalculateTotalBackupSize();
-    });
-    tdAction.appendChild(delBtn);
-    tr.appendChild(tdAction);
-
+    const del = document.createElement('button'); del.className = 'delete-btn'; del.textContent = '删除';
+    del.addEventListener('click', () => { state.addedWorkspaces.splice(idx, 1); renderWorkspacesTable(); recalculateTotalBackupSize(); });
+    tdAction.appendChild(del); tr.appendChild(tdAction);
     tbody.appendChild(tr);
   });
 }
 
-// Setup restore tab UI elements
+// ---------------------------------------------------------------------------
+// 还原
+// ---------------------------------------------------------------------------
 function initRestoreTab() {
   const dropzone = document.getElementById('restore-dropzone');
   const fileInput = document.getElementById('file-restore-upload');
   const confirmBtn = document.getElementById('btn-execute-restore');
 
-  // Interactive dropzone click
-  dropzone.addEventListener('click', () => {
-    fileInput.click();
-  });
-
-  // Drag over effects
-  dropzone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropzone.style.borderColor = '#3b82f6';
-    dropzone.style.backgroundColor = 'rgba(59, 130, 246, 0.05)';
-  });
-
-  dropzone.addEventListener('dragleave', () => {
-    dropzone.style.borderColor = 'rgba(255, 255, 255, 0.1)';
-    dropzone.style.backgroundColor = 'transparent';
-  });
-
+  dropzone.addEventListener('click', () => fileInput.click());
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.borderColor = '#3b82f6'; dropzone.style.backgroundColor = 'rgba(59,130,246,0.05)'; });
+  dropzone.addEventListener('dragleave', () => { dropzone.style.borderColor = 'rgba(255,255,255,0.1)'; dropzone.style.backgroundColor = 'transparent'; });
   dropzone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropzone.style.borderColor = 'rgba(255, 255, 255, 0.1)';
-    dropzone.style.backgroundColor = 'transparent';
-    if (e.dataTransfer.files.length > 0) {
-      handleRestoreUpload(e.dataTransfer.files[0]);
-    }
+    e.preventDefault(); dropzone.style.borderColor = 'rgba(255,255,255,0.1)'; dropzone.style.backgroundColor = 'transparent';
+    if (e.dataTransfer.files.length) handleRestoreUpload(e.dataTransfer.files[0]);
   });
+  fileInput.addEventListener('change', () => { if (fileInput.files.length) handleRestoreUpload(fileInput.files[0]); });
 
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files.length > 0) {
-      handleRestoreUpload(fileInput.files[0]);
-    }
-  });
-
-  // Execute restore button
   confirmBtn.addEventListener('click', async () => {
     if (!state.activeUploadManifest) return;
-
-    // Gather path mappings from input fields
     const pathMapping = {};
-    const inputFields = document.querySelectorAll('.mapping-path-input');
-    
-    inputFields.forEach(input => {
-      const origPath = input.getAttribute('data-original');
-      const targetPath = input.value.trim();
-      pathMapping[origPath] = targetPath;
+    document.querySelectorAll('.mapping-path-input').forEach(input => {
+      pathMapping[input.getAttribute('data-original')] = input.value.trim();
     });
-
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = '还原中…';
-    switchTab('logs');
-
+    confirmBtn.disabled = true; confirmBtn.textContent = '还原中…'; switchTab('logs');
     try {
       const res = await fetch('/api/restore-confirm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pathMapping })
       });
       const data = await res.json();
       if (res.ok) {
-        alert('还原与配置同步完成！请查看 home 目录下的 BridgeSync-MIGRATION-NOTES.txt 了解收尾步骤。');
-        // Reload dashboard stats
+        alert('还原完成！请查看 home 目录下的 BridgeSync-MIGRATION-NOTES.txt 了解收尾步骤。');
         detectEnvironment();
-        // Reset upload zone
         document.getElementById('restore-configurator').style.display = 'none';
         dropzone.style.display = 'block';
         state.activeUploadManifest = null;
-      } else {
-        alert(`还原失败：${data.error}`);
-      }
-    } catch (e) {
-      alert(`还原过程中网络错误：${e.message}`);
-    } finally {
-      confirmBtn.disabled = false;
-      confirmBtn.textContent = '开始还原';
-    }
+      } else alert(`还原失败：${data.error}`);
+    } catch (e) { alert(`还原过程中网络错误：${e.message}`); }
+    finally { confirmBtn.disabled = false; confirmBtn.textContent = '开始还原'; }
   });
 }
 
-// Upload backup ZIP and inspect manifest
 async function handleRestoreUpload(file) {
   appendTerminalLine(`正在上传备份压缩包：${file.name}（${formatBytes(file.size)}）…`, 'system');
-
   const formData = new FormData();
   formData.append('backupFile', file);
-
   try {
-    const res = await fetch('/api/restore-upload', {
-      method: 'POST',
-      body: formData
-    });
-
+    const res = await fetch('/api/restore-upload', { method: 'POST', body: formData });
     const data = await res.json();
     if (res.ok) {
       state.activeUploadManifest = data.manifest;
       renderRestoreConfigurator(data.manifest);
       appendTerminalLine('备份文件解析成功，请在下方配置路径映射。', 'success');
-    } else {
-      alert(`解析备份 ZIP 失败：${data.error}`);
-      appendTerminalLine(`上传备份出错：${data.error}`, 'error');
-    }
-  } catch (e) {
-    alert(`上传备份过程中网络错误：${e.message}`);
-  }
+    } else { alert(`解析备份 ZIP 失败：${data.error}`); appendTerminalLine(`上传备份出错：${data.error}`, 'error'); }
+  } catch (e) { alert(`上传备份过程中网络错误：${e.message}`); }
 }
 
-// Render the remapping UI after backup parsing
 function renderRestoreConfigurator(manifest) {
   const configSection = document.getElementById('restore-configurator');
   const dropzone = document.getElementById('restore-dropzone');
-  
-  // Set metadata
+
   document.getElementById('restore-meta-date').textContent = new Date(manifest.backupTime).toLocaleString();
   document.getElementById('restore-meta-os').textContent = manifest.sourceOS;
   document.getElementById('restore-meta-host').textContent = manifest.sourceHost;
   document.getElementById('restore-meta-user').textContent = manifest.sourceUser;
 
-  // Set checklist status indicators based on the new manifest shape.
-  const c = manifest.contents;
-  const toggle = (id, on) => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = on ? 'flex' : 'none';
-  };
-
-  toggle('item-restore-claude', !!c.claude);
-  toggle('item-restore-gemini', !!c.gemini);
-  toggle('item-restore-ssh', !!c.ssh);
-  toggle('item-restore-gitconfig', !!c.gitconfig);
-
-  const editors = c.editors || [];
-  const editorItem = document.getElementById('item-restore-editors');
-  const extCountEl = document.getElementById('restore-ext-count');
-  if (editors.length > 0) {
-    editorItem.style.display = 'flex';
-    const totalExt = editors.reduce((n, e) => n + ((e.extensions && e.extensions.length) || 0), 0);
-    const names = editors.map(e => e.name).join(', ');
-    extCountEl.textContent = `${names} · ${totalExt} ext`;
-  } else {
-    editorItem.style.display = 'none';
+  // 动态还原清单：按 manifest.tools
+  const checklist = document.getElementById('restore-checklist');
+  checklist.innerHTML = '';
+  (manifest.tools || []).forEach(t => {
+    const extItem = (t.items || []).find(it => it.kind === 'editorExtensions');
+    const extStr = extItem ? `（${extItem.extensions.length} 扩展）` : '';
+    const li = document.createElement('li');
+    li.innerHTML = `<div class="dot checked"></div><span>${escapeHtml(t.name)}${extStr}${t.secret ? ' 🔒' : ''}</span>`;
+    checklist.appendChild(li);
+  });
+  if (manifest.workspaces && manifest.workspaces.length) {
+    const li = document.createElement('li');
+    li.innerHTML = `<div class="dot checked"></div><span>工作区目录（${manifest.workspaces.length}）</span>`;
+    checklist.appendChild(li);
+  }
+  if (!checklist.children.length) {
+    checklist.innerHTML = '<li><span style="color:#64748b;">此备份不含可还原内容。</span></li>';
   }
 
-  // Populate Path mappings
+  // 路径映射：仅工作区需要用户填
   const tbody = document.getElementById('path-mappings-list');
   tbody.innerHTML = '';
-
-  let mappingsCount = 0;
-
-  // Render workspaces path mapping
-  if (manifest.contents.workspaces && manifest.contents.workspaces.length > 0) {
-    manifest.contents.workspaces.forEach(w => {
-      mappingsCount++;
-      const tr = document.createElement('tr');
-
-      const tdOrig = document.createElement('td');
-      tdOrig.innerHTML = `<span class="comp-badge wsp">工作区</span> <br> ${w.originalPath}`;
-      tr.appendChild(tdOrig);
-
-      const tdTarget = document.createElement('td');
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.className = 'mapping-path-input';
-      input.setAttribute('data-original', w.originalPath);
-      
-      // Smart path mapping helper: adapt separators depending on the host OS
-      let guessedPath = w.originalPath;
-      if (state.os === 'win32' && w.originalPath.includes('/')) {
-        // Mapping Linux/macOS to Windows: convert to Windows format
-        guessedPath = 'C:\\Projects\\' + w.folderName;
-      } else if (state.os !== 'win32' && w.originalPath.includes('\\')) {
-        // Mapping Windows to Linux/macOS
-        guessedPath = '/Users/' + state.username + '/projects/' + w.folderName;
-      }
-      input.value = guessedPath;
-
-      tdTarget.appendChild(input);
-      tr.appendChild(tdTarget);
-
-      tbody.appendChild(tr);
-    });
+  (manifest.workspaces || []).forEach(w => {
+    const tr = document.createElement('tr');
+    const tdOrig = document.createElement('td');
+    tdOrig.innerHTML = `<span class="comp-badge wsp">工作区</span><br>${escapeHtml(w.originalPath)}`;
+    tr.appendChild(tdOrig);
+    const tdTarget = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'text'; input.className = 'mapping-path-input';
+    input.setAttribute('data-original', w.originalPath);
+    let guessed = w.originalPath;
+    if (state.os === 'win32' && w.originalPath.includes('/')) guessed = 'C:\\Projects\\' + w.folderName;
+    else if (state.os !== 'win32' && w.originalPath.includes('\\')) guessed = '/Users/' + state.username + '/projects/' + w.folderName;
+    input.value = guessed;
+    tdTarget.appendChild(input); tr.appendChild(tdTarget);
+    tbody.appendChild(tr);
+  });
+  if (!tbody.children.length) {
+    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; color:#64748b;">本次还原无需配置目录映射（工具配置会还原到各自标准位置）。</td></tr>';
   }
 
-  // Render Claude project keys as maps (in case they have corresponding paths)
-  if (manifest.contents.claude && manifest.contents.workspaces.length > 0) {
-    manifest.contents.workspaces.forEach(w => {
-      // Find matching project key
-      const projectKey = w.originalPath.replace(/[^a-zA-Z0-9]/g, '-');
-      mappingsCount++;
-
-      const tr = document.createElement('tr');
-      const tdOrig = document.createElement('td');
-      tdOrig.innerHTML = `<span class="comp-badge claude">Claude 会话</span> <br> 项目：${w.folderName}（Key: ${projectKey}）`;
-      tr.appendChild(tdOrig);
-
-      const tdTarget = document.createElement('td');
-      tdTarget.innerHTML = `<span style="color:#64748b; font-size:12px;">自动映射到上方对应的工作区路径</span>`;
-      tr.appendChild(tdTarget);
-
-      tbody.appendChild(tr);
-    });
-  }
-
-  if (mappingsCount === 0) {
-    tbody.innerHTML = `
-      <tr>
-        <td colspan="2" style="text-align: center; color: #64748b;">本次备份无需配置目录映射。</td>
-      </tr>
-    `;
-  }
-
-  // Toggle sections
   dropzone.style.display = 'none';
   configSection.style.display = 'block';
 }
 
-// Setup extension viewer modal
-function initModals() {
-  const modal = document.getElementById('extensions-modal');
-  const viewBtn = document.getElementById('btn-view-extensions');
-  const closeBtn = document.getElementById('modal-close');
-  const listEl = document.getElementById('modal-extensions-list');
-
-  viewBtn.addEventListener('click', () => {
-    listEl.innerHTML = '';
-    const list = state.vscode ? state.vscode.extensionsList : [];
-    
-    if (list.length === 0) {
-      listEl.innerHTML = '<li>未找到扩展。</li>';
-    } else {
-      list.forEach(ext => {
-        const li = document.createElement('li');
-        li.textContent = ext;
-        listEl.appendChild(li);
-      });
-    }
-
-    modal.classList.add('open');
-  });
-
-  closeBtn.addEventListener('click', () => {
-    modal.classList.remove('open');
-  });
-
-  window.addEventListener('click', (e) => {
-    if (e.target === modal) {
-      modal.classList.remove('open');
-    }
-  });
-}
-
-// Convert bytes helper
+// ---------------------------------------------------------------------------
+// 工具函数
+// ---------------------------------------------------------------------------
 function formatBytes(bytes, decimals = 2) {
-  if (bytes === 0) return '0.00 B';
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
+  if (!bytes) return '0.00 B';
+  const k = 1024, dm = decimals < 0 ? 0 : decimals;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }

@@ -4,6 +4,7 @@ const fs = require('fs');
 const pathMod = require('path');
 const os = require('os');
 const { exec, spawn } = require('child_process');
+const { TOOLS, buildCtx, resolve, getEditorTools } = require('./tools');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -20,13 +21,19 @@ const tempDir = pathMod.join(__dirname, 'temp');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// Real-time log streaming via Server-Sent Events (SSE)
+// VSCode 系 User 目录里值得迁移的项（globalStorage/workspaceStorage/History 与机器/路径绑定，排除）
+const EDITOR_USER_ITEMS = ['settings.json', 'keybindings.json', 'snippets'];
+
+// 测量体积时跳过的重型/缓存目录，使显示值≈实际备份大小
+const SIZE_EXCLUDES = ['cache', 'downloads', 'node_modules', '.git', 'paste-cache', 'telemetry', 'browser_recordings', 'antigravity-browser-profile', 'globalStorage', 'workspaceStorage', 'History', 'db', 'logs'];
+
+// ---------------------------------------------------------------------------
+// SSE 实时日志
+// ---------------------------------------------------------------------------
 let logClients = [];
 function sendLog(message, type = 'info') {
   console.log(`[${type.toUpperCase()}] ${message}`);
-  logClients.forEach(client => {
-    client.write(`data: ${JSON.stringify({ message, type })}\n\n`);
-  });
+  logClients.forEach(client => client.write(`data: ${JSON.stringify({ message, type })}\n\n`));
 }
 
 app.get('/api/logs', (req, res) => {
@@ -34,136 +41,41 @@ app.get('/api/logs', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
-
   logClients.push(res);
-  sendLog('Connected to real-time log terminal.', 'system');
-
-  req.on('close', () => {
-    logClients = logClients.filter(client => client !== res);
-  });
+  sendLog('已连接实时日志终端。', 'system');
+  req.on('close', () => { logClients = logClients.filter(c => c !== res); });
 });
 
 // ---------------------------------------------------------------------------
-// OS Path Helpers
-// ---------------------------------------------------------------------------
-function getClaudePath() {
-  return pathMod.join(os.homedir(), '.claude');
-}
-function getClaudeConfigPath() {
-  return pathMod.join(os.homedir(), '.claude.json');
-}
-function getGeminiPath() {
-  return pathMod.join(os.homedir(), '.gemini');
-}
-function getSshPath() {
-  return pathMod.join(os.homedir(), '.ssh');
-}
-function getGitconfigPath() {
-  return pathMod.join(os.homedir(), '.gitconfig');
-}
-function getAntigravityArgvPath() {
-  return pathMod.join(os.homedir(), '.antigravity', 'argv.json');
-}
-
-function getClaudeDesktopConfigs() {
-  const platform = os.platform();
-  const list = [];
-  if (platform === 'win32') {
-    const local = process.env.LOCALAPPDATA || '';
-    list.push({ name: 'Claude', path: pathMod.join(local, 'Claude', 'claude_desktop_config.json') });
-    list.push({ name: 'Claude-3p', path: pathMod.join(local, 'Claude-3p', 'claude_desktop_config.json') });
-  } else if (platform === 'darwin') {
-    list.push({ name: 'Claude', path: pathMod.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json') });
-  } else {
-    list.push({ name: 'Claude', path: pathMod.join(os.homedir(), '.config', 'Claude', 'claude_desktop_config.json') });
-  }
-  return list;
-}
-
-// VS Code-family editors (VS Code + Antigravity IDE share the same on-disk layout).
-// Each editor can have several User dirs and several extension dirs across variants.
-function getEditors() {
-  const platform = os.platform();
-  const home = os.homedir();
-  let cfgRoot;
-  if (platform === 'win32') cfgRoot = process.env.APPDATA || pathMod.join(home, 'AppData', 'Roaming');
-  else if (platform === 'darwin') cfgRoot = pathMod.join(home, 'Library', 'Application Support');
-  else cfgRoot = pathMod.join(home, '.config');
-
-  return [
-    {
-      id: 'vscode',
-      name: 'VS Code',
-      cli: 'code',
-      userPaths: [pathMod.join(cfgRoot, 'Code', 'User')],
-      extDirs: [pathMod.join(home, '.vscode', 'extensions')]
-    },
-    {
-      id: 'antigravity-ide',
-      name: 'Antigravity IDE',
-      cli: 'antigravity',
-      userPaths: [
-        pathMod.join(cfgRoot, 'Antigravity', 'User'),
-        pathMod.join(cfgRoot, 'Antigravity IDE', 'User')
-      ],
-      extDirs: [
-        pathMod.join(home, '.antigravity', 'extensions'),
-        pathMod.join(home, '.antigravity-ide', 'extensions')
-      ]
-    }
-  ];
-}
-
-// User-dir items worth migrating. workspaceStorage/globalStorage/History are
-// machine/path-specific and excluded to avoid bloat and stale state.
-const EDITOR_USER_ITEMS = ['settings.json', 'keybindings.json', 'snippets'];
-
-// ~/.gemini holds gigabytes of browser recordings / binaries that are pure
-// bloat; keep only the agent's conversations, brain (memory) and configs.
-const GEMINI_EXCLUDES = ['tmp', 'cache', 'antigravity-browser-profile', 'browser_recordings', 'bin'];
-
-// Bulky/cache dir names skipped when measuring sizes for the dashboard, so the
-// displayed number tracks what actually gets backed up.
-const SIZE_EXCLUDES = ['cache', 'downloads', 'node_modules', '.git', 'paste-cache', 'telemetry', 'browser_recordings', 'antigravity-browser-profile'];
-
-// Translate an absolute path to Claude's project-folder key.
-function pathToProjectKey(absolutePath) {
-  return absolutePath.replace(/[^a-zA-Z0-9]/g, '-');
-}
-
-// ---------------------------------------------------------------------------
-// Generic file/dir helpers
+// 文件/目录助手
 // ---------------------------------------------------------------------------
 function getDirInfo(dirPath) {
   let size = 0, fileCount = 0, dirCount = 0;
-  function traverse(currentPath) {
+  function traverse(p) {
     try {
-      const stats = fs.statSync(currentPath);
-      if (stats.isDirectory()) {
+      const st = fs.statSync(p);
+      if (st.isDirectory()) {
         dirCount++;
-        fs.readdirSync(currentPath).forEach(file => {
-          if (SIZE_EXCLUDES.includes(file)) return;
-          traverse(pathMod.join(currentPath, file));
+        fs.readdirSync(p).forEach(f => {
+          if (SIZE_EXCLUDES.includes(f)) return;
+          traverse(pathMod.join(p, f));
         });
-      } else {
-        fileCount++;
-        size += stats.size;
-      }
-    } catch (e) { /* ignore permission errors */ }
+      } else { fileCount++; size += st.size; }
+    } catch (e) { /* 忽略权限错误 */ }
   }
   traverse(dirPath);
   return { size, fileCount, dirCount };
 }
 
-// Plain recursive copy (used for staging into a fresh temp dir).
+function pathExists(p) { try { return fs.existsSync(p); } catch (e) { return false; } }
+
+// 普通递归复制（用于打包进全新的临时目录）
 function copyDirRecursive(src, dest, excludeNames = []) {
   if (excludeNames.includes(pathMod.basename(src))) return;
-  const stats = fs.statSync(src);
-  if (stats.isDirectory()) {
+  const st = fs.statSync(src);
+  if (st.isDirectory()) {
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-    fs.readdirSync(src).forEach(file => {
-      copyDirRecursive(pathMod.join(src, file), pathMod.join(dest, file), excludeNames);
-    });
+    fs.readdirSync(src).forEach(f => copyDirRecursive(pathMod.join(src, f), pathMod.join(dest, f), excludeNames));
   } else {
     const parent = pathMod.dirname(dest);
     if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
@@ -171,241 +83,277 @@ function copyDirRecursive(src, dest, excludeNames = []) {
   }
 }
 
-// Non-destructive copy: never overwrite a file that already exists on target.
+// 非破坏式复制：绝不覆盖目标机已存在的文件
 function copyDirSkipExisting(src, dest, excludeNames = []) {
   if (excludeNames.includes(pathMod.basename(src))) return;
-  const stats = fs.statSync(src);
-  if (stats.isDirectory()) {
+  const st = fs.statSync(src);
+  if (st.isDirectory()) {
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-    fs.readdirSync(src).forEach(file => {
-      copyDirSkipExisting(pathMod.join(src, file), pathMod.join(dest, file), excludeNames);
-    });
+    fs.readdirSync(src).forEach(f => copyDirSkipExisting(pathMod.join(src, f), pathMod.join(dest, f), excludeNames));
   } else {
-    if (fs.existsSync(dest)) return; // target wins
+    if (fs.existsSync(dest)) return; // 目标机优先
     const parent = pathMod.dirname(dest);
     if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
     fs.copyFileSync(src, dest);
   }
 }
 
-// Deep merge where the target's existing values always win; source only fills
-// in keys the target is missing.
+// 深合并：目标机现有值永远赢，source 只补目标缺的键
 function deepMergeTargetWins(target, source) {
   if (Array.isArray(target) || Array.isArray(source)) return target;
   if (typeof target !== 'object' || target === null) return target;
   if (typeof source !== 'object' || source === null) return target;
   const out = { ...target };
-  for (const key of Object.keys(source)) {
-    if (!(key in out)) out[key] = source[key];
-    else out[key] = deepMergeTargetWins(out[key], source[key]);
+  for (const k of Object.keys(source)) {
+    if (!(k in out)) out[k] = source[k];
+    else out[k] = deepMergeTargetWins(out[k], source[k]);
   }
   return out;
 }
 
-// Write a JSON config non-destructively: if target absent, write source as-is;
-// otherwise merge with target winning. `sourceContent` is the (already
-// path-rewritten) backup JSON string.
 function mergeJsonIntoTarget(sourceContent, targetFile) {
   let source;
   try { source = JSON.parse(sourceContent); }
-  catch (e) { sendLog(`Skipped malformed backup JSON for ${pathMod.basename(targetFile)}.`, 'warning'); return false; }
-
+  catch (e) { sendLog(`备份 JSON 解析失败，跳过 ${pathMod.basename(targetFile)}。`, 'warning'); return; }
   const parent = pathMod.dirname(targetFile);
   if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
-
   if (!fs.existsSync(targetFile)) {
     fs.writeFileSync(targetFile, JSON.stringify(source, null, 2), 'utf8');
-    return true;
+    return;
   }
   let target;
   try { target = JSON.parse(fs.readFileSync(targetFile, 'utf8')); }
-  catch (e) { sendLog(`Target ${pathMod.basename(targetFile)} is not valid JSON; left untouched.`, 'warning'); return false; }
-
-  const merged = deepMergeTargetWins(target, source);
-  fs.writeFileSync(targetFile, JSON.stringify(merged, null, 2), 'utf8');
-  return true;
+  catch (e) { sendLog(`目标 ${pathMod.basename(targetFile)} 不是合法 JSON，保持原样。`, 'warning'); return; }
+  fs.writeFileSync(targetFile, JSON.stringify(deepMergeTargetWins(target, source), null, 2), 'utf8');
 }
 
-// Apply every old->new mapping to a string, covering raw, forward-slash and
-// escaped-backslash representations.
 function rewritePaths(content, pathMapping) {
-  Object.keys(pathMapping).forEach(oldPath => {
-    const newPath = pathMapping[oldPath];
-    if (!oldPath || !newPath) return;
-    content = content.split(oldPath).join(newPath);
-    content = content.split(oldPath.replace(/\\/g, '/')).join(newPath.replace(/\\/g, '/'));
-    content = content.split(oldPath.replace(/\\/g, '\\\\')).join(newPath.replace(/\\/g, '\\\\'));
+  Object.keys(pathMapping).forEach(oldP => {
+    const newP = pathMapping[oldP];
+    if (!oldP || !newP) return;
+    content = content.split(oldP).join(newP);
+    content = content.split(oldP.replace(/\\/g, '/')).join(newP.replace(/\\/g, '/'));
+    content = content.split(oldP.replace(/\\/g, '\\\\')).join(newP.replace(/\\/g, '\\\\'));
   });
   return content;
 }
 
-// Single-quote a string for a PowerShell '...' literal.
-function psQuote(s) {
-  return "'" + String(s).replace(/'/g, "''") + "'";
-}
+function psQuote(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
 
 function runPowerShell(psCommand) {
   return new Promise((resolve, reject) => {
     const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCommand]);
-    child.stdout.on('data', data => sendLog(data.toString().trim()));
-    child.stderr.on('data', data => sendLog(data.toString().trim(), 'warning'));
-    child.on('close', code => code === 0 ? resolve() : reject(new Error(`PowerShell exited with code ${code}`)));
+    child.stdout.on('data', d => sendLog(d.toString().trim()));
+    child.stderr.on('data', d => sendLog(d.toString().trim(), 'warning'));
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(`PowerShell 退出码 ${code}`)));
   });
 }
 
 function zipDirectory(sourceDir, outPath) {
-  const platform = os.platform();
-  sendLog(`Compressing backup directory to: ${pathMod.basename(outPath)}`, 'backup');
-  if (platform === 'win32') {
-    const psCommand = `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory(${psQuote(sourceDir)}, ${psQuote(outPath)})`;
-    return runPowerShell(psCommand);
+  sendLog(`正在压缩备份目录到：${pathMod.basename(outPath)}`, 'backup');
+  if (os.platform() === 'win32') {
+    return runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory(${psQuote(sourceDir)}, ${psQuote(outPath)})`);
   }
   return new Promise((resolve, reject) => {
     const child = spawn('zip', ['-r', outPath, '.'], { cwd: sourceDir });
-    child.stdout.on('data', data => sendLog(data.toString().trim()));
-    child.stderr.on('data', data => sendLog(data.toString().trim(), 'warning'));
-    child.on('close', code => code === 0 ? resolve() : reject(new Error(`Zip exited with code ${code}`)));
+    child.stdout.on('data', d => sendLog(d.toString().trim()));
+    child.stderr.on('data', d => sendLog(d.toString().trim(), 'warning'));
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(`zip 退出码 ${code}`)));
   });
 }
 
 function unzipDirectory(zipPath, targetDir) {
-  const platform = os.platform();
-  sendLog('Extracting backup file to temporary restore directory...', 'restore');
-  if (platform === 'win32') {
-    const psCommand = `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(${psQuote(zipPath)}, ${psQuote(targetDir)})`;
-    return runPowerShell(psCommand);
+  sendLog('正在解压备份文件到临时还原目录…', 'restore');
+  if (os.platform() === 'win32') {
+    return runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(${psQuote(zipPath)}, ${psQuote(targetDir)})`);
   }
   return new Promise((resolve, reject) => {
     const child = spawn('unzip', ['-o', zipPath, '-d', targetDir]);
-    child.stdout.on('data', data => sendLog(data.toString().trim()));
-    child.stderr.on('data', data => sendLog(data.toString().trim(), 'warning'));
-    child.on('close', code => code === 0 ? resolve() : reject(new Error(`Unzip exited with code ${code}`)));
+    child.stdout.on('data', d => sendLog(d.toString().trim()));
+    child.stderr.on('data', d => sendLog(d.toString().trim(), 'warning'));
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(`unzip 退出码 ${code}`)));
   });
 }
 
-// List an editor's extensions via its CLI, falling back to scanning ext dirs.
-function listEditorExtensions(editor) {
-  return new Promise(resolve => {
-    exec(`${editor.cli} --list-extensions`, (err, stdout) => {
-      if (!err && stdout) {
-        return resolve(stdout.split('\n').map(x => x.trim()).filter(Boolean));
-      }
+function pathToProjectKey(absolutePath) { return absolutePath.replace(/[^a-zA-Z0-9]/g, '-'); }
+
+// 用编辑器 CLI 列出扩展，失败则扫描扩展目录
+function listExtensions(cli, extDirs) {
+  return new Promise(res => {
+    exec(`${cli} --list-extensions`, (err, stdout) => {
+      if (!err && stdout) return res(stdout.split('\n').map(x => x.trim()).filter(Boolean));
       const found = new Set();
-      editor.extDirs.forEach(dir => {
-        if (!fs.existsSync(dir)) return;
-        try {
-          fs.readdirSync(dir).forEach(f => {
-            if (fs.statSync(pathMod.join(dir, f)).isDirectory()) found.add(f);
-          });
-        } catch (e) { /* ignore */ }
+      (extDirs || []).forEach(dir => {
+        if (!pathExists(dir)) return;
+        try { fs.readdirSync(dir).forEach(f => { if (fs.statSync(pathMod.join(dir, f)).isDirectory()) found.add(f); }); } catch (e) {}
       });
-      resolve([...found]);
+      res([...found]);
     });
   });
 }
 
 // ---------------------------------------------------------------------------
-// 1. Detect configuration environments
+// 注册表助手：解析条目的源路径 / 探测工具
+// ---------------------------------------------------------------------------
+function itemSources(item, ctx) {
+  if (item.kind === 'editorUser') return resolve(item.paths, ctx);
+  if (item.kind === 'editorExtensions') return [];
+  if (item.kind === 'extAgent') return [];
+  return resolve(item.src, ctx);          // dir / file / jsonMerge / claudeProjects
+}
+
+// 某 extAgent 在各宿主编辑器 globalStorage 下的实际数据目录
+function extAgentHosts(extId, ctx) {
+  const hosts = [];
+  getEditorTools().forEach(ed => {
+    resolve(ed.userPaths, ctx).forEach((userPath, k) => {
+      const gs = pathMod.join(userPath, 'globalStorage', extId);
+      if (pathExists(gs)) hosts.push({ editorId: ed.id, userIndex: k, dir: gs });
+    });
+  });
+  return hosts;
+}
+
+// 探测一个工具：是否存在、体积、（编辑器的）扩展数
+async function detectTool(tool, ctx) {
+  let exists = false, size = 0, extCount = 0, extensionsList = [];
+  for (const item of tool.items) {
+    if (item.kind === 'editorExtensions') {
+      extensionsList = await listExtensions(tool.cli, resolve(item.extDirs, ctx));
+      extCount = extensionsList.length;
+      if (extCount) exists = true;
+    } else if (item.kind === 'extAgent') {
+      extAgentHosts(item.extId, ctx).forEach(h => { exists = true; try { size += getDirInfo(h.dir).size; } catch (e) {} });
+    } else {
+      itemSources(item, ctx).forEach(p => {
+        if (!pathExists(p)) return;
+        exists = true;
+        try { size += fs.statSync(p).isDirectory() ? getDirInfo(p).size : fs.statSync(p).size; } catch (e) {}
+      });
+    }
+  }
+  return { id: tool.id, name: tool.name, category: tool.category, secret: !!tool.secret, exists, size, extCount, extensionsList };
+}
+
+// ---------------------------------------------------------------------------
+// 1. 环境检测
 // ---------------------------------------------------------------------------
 app.get('/api/detect', async (req, res) => {
-  const claudePath = getClaudePath();
-  const geminiPath = getGeminiPath();
-  const editors = getEditors();
-
-  const results = {
+  const ctx = buildCtx();
+  const tools = [];
+  for (const tool of TOOLS) tools.push(await detectTool(tool, ctx));
+  res.json({
     os: os.platform(),
     hostname: os.hostname(),
     username: os.userInfo().username,
     home: os.homedir(),
-    claude: {
-      path: claudePath,
-      exists: fs.existsSync(claudePath),
-      configExists: fs.existsSync(getClaudeConfigPath()),
-      desktopConfigs: getClaudeDesktopConfigs().filter(x => fs.existsSync(x.path)).map(x => ({ name: x.name, path: x.path })),
-      size: 0, sessionsCount: 0, projects: []
-    },
-    // Primary editor surfaced as `vscode` for the existing dashboard cards.
-    vscode: { path: editors[0].userPaths[0], exists: false, size: 0, extensionsCount: 0, extensionsList: [] },
-    editors: [],
-    gemini: { path: geminiPath, exists: fs.existsSync(geminiPath), size: 0 },
-    ssh: { path: getSshPath(), exists: fs.existsSync(getSshPath()) },
-    gitconfig: { path: getGitconfigPath(), exists: fs.existsSync(getGitconfigPath()) }
-  };
-
-  // Claude
-  if (results.claude.exists) {
-    try {
-      results.claude.size = getDirInfo(claudePath).size;
-      const configPath = getClaudeConfigPath();
-      if (fs.existsSync(configPath)) results.claude.size += fs.statSync(configPath).size;
-      results.claude.desktopConfigs.forEach(item => { results.claude.size += fs.statSync(item.path).size; });
-
-      const projectsDir = pathMod.join(claudePath, 'projects');
-      if (fs.existsSync(projectsDir)) {
-        results.claude.projects = fs.readdirSync(projectsDir)
-          .filter(p => fs.statSync(pathMod.join(projectsDir, p)).isDirectory())
-          .map(p => {
-            const files = fs.readdirSync(pathMod.join(projectsDir, p));
-            const sessions = files.filter(f => f.endsWith('.jsonl')).length;
-            results.claude.sessionsCount += sessions;
-            return { key: p, sessions };
-          });
-      }
-    } catch (e) { console.error(e); }
-  }
-
-  if (results.gemini.exists) {
-    try { results.gemini.size = getDirInfo(geminiPath).size; } catch (e) { console.error(e); }
-  }
-
-  // Editors (VS Code + Antigravity IDE)
-  for (const editor of editors) {
-    const presentUserPaths = editor.userPaths.filter(p => fs.existsSync(p));
-    let size = 0;
-    presentUserPaths.forEach(p => { try { size += getDirInfo(p).size; } catch (e) {} });
-    const extList = await listEditorExtensions(editor);
-    const info = {
-      id: editor.id, name: editor.name,
-      exists: presentUserPaths.length > 0 || extList.length > 0,
-      size, extensionsCount: extList.length, extensionsList: extList
-    };
-    results.editors.push(info);
-    if (editor.id === 'vscode') {
-      results.vscode = { path: editor.userPaths[0], exists: info.exists, size, extensionsCount: extList.length, extensionsList: extList };
-    }
-  }
-
-  res.json(results);
+    tools
+  });
 });
 
 // ---------------------------------------------------------------------------
-// 2. Scan arbitrary workspace path
+// 2. 扫描任意工作区
 // ---------------------------------------------------------------------------
 app.post('/api/scan-workspace', (req, res) => {
   const { workspacePath } = req.body;
-  if (!workspacePath) return res.status(400).json({ error: 'workspacePath is required' });
-  const cleanPath = pathMod.resolve(workspacePath);
-  if (!fs.existsSync(cleanPath)) return res.status(404).json({ error: 'Directory does not exist' });
+  if (!workspacePath) return res.status(400).json({ error: '缺少 workspacePath' });
+  const clean = pathMod.resolve(workspacePath);
+  if (!fs.existsSync(clean)) return res.status(404).json({ error: '目录不存在' });
   try {
-    const info = getDirInfo(cleanPath);
-    res.json({ path: cleanPath, name: pathMod.basename(cleanPath), size: info.size, files: info.fileCount, dirs: info.dirCount });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+    const info = getDirInfo(clean);
+    res.json({ path: clean, name: pathMod.basename(clean), size: info.size, files: info.fileCount, dirs: info.dirCount });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---------------------------------------------------------------------------
-// 3. Backup
+// 3. 备份（数据驱动）
 // ---------------------------------------------------------------------------
-app.post('/api/backup', async (req, res) => {
-  const {
-    includeClaude, includeClaudeCredentials,
-    includeEditors,        // array of editor ids to back up (settings + extensions)
-    includeGemini, includeSSH, includeGitconfig,
-    customWorkspaces
-  } = req.body;
+function stageTool(tool, ctx, toolDir, includeSecrets) {
+  // 返回该工具的 manifest 条目数组；无数据则返回 []
+  const records = [];
+  let staged = false, secretStaged = false;
 
-  const editorIds = Array.isArray(includeEditors) ? includeEditors : [];
+  tool.items.forEach((item, i) => {
+    const itemDir = pathMod.join(toolDir, `item_${i}`);
+
+    if (item.kind === 'editorExtensions') {
+      return; // 扩展清单在外层异步统一处理
+    }
+
+    if (item.kind === 'extAgent') {
+      const hosts = extAgentHosts(item.extId, ctx).map(h => {
+        const dest = pathMod.join(itemDir, `${h.editorId}__user_${h.userIndex}`);
+        copyDirRecursive(h.dir, dest, item.excludes || []);
+        return { editorId: h.editorId, userIndex: h.userIndex };
+      });
+      if (hosts.length) { staged = true; records.push({ i, kind: 'extAgent', extId: item.extId, hosts }); }
+      return;
+    }
+
+    if (item.kind === 'claudeProjects') {
+      const src = itemSources(item, ctx)[0];
+      if (src && pathExists(src)) {
+        copyDirRecursive(src, pathMod.join(itemDir, 'projects'));
+        staged = true; records.push({ i, kind: 'claudeProjects', present: true });
+      }
+      return;
+    }
+
+    if (item.kind === 'editorUser') {
+      const srcIndices = [];
+      itemSources(item, ctx).forEach((userPath, j) => {
+        if (!pathExists(userPath)) return;
+        let any = false;
+        EDITOR_USER_ITEMS.forEach(it => {
+          const p = pathMod.join(userPath, it);
+          if (pathExists(p)) { copyDirRecursive(p, pathMod.join(itemDir, `src_${j}`, it)); any = true; }
+        });
+        if (any) srcIndices.push(j);
+      });
+      if (srcIndices.length) { staged = true; records.push({ i, kind: 'editorUser', srcIndices }); }
+      return;
+    }
+
+    const excludes = (item.excludes || []).concat((!includeSecrets && item.secretNames) || []);
+    const skipNames = item.skipNames || [];
+    const srcIndices = [];
+
+    itemSources(item, ctx).forEach((src, j) => {
+      if (!pathExists(src)) return;
+      const isDir = fs.statSync(src).isDirectory();
+      if (item.kind === 'dir') {
+        // 顶层跳过 skipNames（如 gemini 的 projects.json 由 jsonMerge 处理）
+        const dest = pathMod.join(itemDir, `src_${j}`);
+        fs.mkdirSync(dest, { recursive: true });
+        fs.readdirSync(src).forEach(f => {
+          if (excludes.includes(f) || skipNames.includes(f)) return;
+          copyDirRecursive(pathMod.join(src, f), pathMod.join(dest, f), excludes);
+        });
+        if (item.secretNames && includeSecrets && item.secretNames.some(n => pathExists(pathMod.join(src, n)))) secretStaged = true;
+      } else if (item.kind === 'file') {
+        if (isDir) return;
+        copyDirRecursive(src, pathMod.join(itemDir, `file_${j}`));
+      } else if (item.kind === 'jsonMerge') {
+        if (isDir) return;
+        copyDirRecursive(src, pathMod.join(itemDir, `json_${j}`));
+      }
+      srcIndices.push(j);
+    });
+
+    if (srcIndices.length) {
+      staged = true;
+      records.push({ i, kind: item.kind, rewrite: !!item.rewrite, srcIndices });
+    }
+  });
+
+  if (tool.secret && staged) secretStaged = true;
+  return { records, staged, secretStaged };
+}
+
+app.post('/api/backup', async (req, res) => {
+  const { selectedTools, includeSecrets, customWorkspaces } = req.body;
+  const selected = Array.isArray(selectedTools) ? selectedTools : [];
+  const ctx = buildCtx();
   const timestamp = Date.now();
   const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
   const sessionTempDir = pathMod.join(tempDir, `backup_${timestamp}`);
@@ -413,7 +361,7 @@ app.post('/api/backup', async (req, res) => {
 
   try {
     fs.mkdirSync(sessionTempDir, { recursive: true });
-    sendLog(`Starting backup process... Temp dir: ${sessionTempDir}`, 'system');
+    sendLog(`开始备份… 临时目录：${sessionTempDir}`, 'system');
 
     const manifest = {
       backupTime: new Date().toISOString(),
@@ -421,179 +369,85 @@ app.post('/api/backup', async (req, res) => {
       sourceHost: os.hostname(),
       sourceUser: os.userInfo().username,
       sourceHome: os.homedir(),
-      includesCredentials: false,
-      contents: {
-        claude: false,
-        editors: [],   // [{ id, name, userIndices, extensions }]
-        gemini: false,
-        ssh: false,
-        gitconfig: false,
-        workspaces: []
-      }
+      includesSecrets: false,
+      tools: [],
+      workspaces: []
     };
 
-    // --- Claude Code CLI ---
-    if (includeClaude) {
-      sendLog('Backing up Claude Code configurations and project files...', 'backup');
-      const claudeSrc = getClaudePath();
-      const claudeDest = pathMod.join(sessionTempDir, 'claude');
-      if (fs.existsSync(claudeSrc)) {
-        fs.mkdirSync(claudeDest, { recursive: true });
-        const excludes = ['cache', 'downloads', 'paste-cache', 'telemetry'];
-        if (!includeClaudeCredentials) {
-          excludes.push('.credentials.json');
-          sendLog('Excluding sensitive .credentials.json from backup.', 'backup');
-        } else {
-          manifest.includesCredentials = true;
-          sendLog('WARNING: backup will contain plaintext .credentials.json (auth token). Keep the archive private.', 'warning');
+    for (const tool of TOOLS) {
+      if (!selected.includes(tool.id)) continue;
+      sendLog(`正在备份：${tool.name}…`, 'backup');
+      const toolDir = pathMod.join(sessionTempDir, 'tools', tool.id);
+      const { records, staged, secretStaged } = stageTool(tool, ctx, toolDir, !!includeSecrets);
+
+      // 编辑器扩展清单
+      for (let i = 0; i < tool.items.length; i++) {
+        const item = tool.items[i];
+        if (item.kind !== 'editorExtensions') continue;
+        const extensions = await listExtensions(tool.cli, resolve(item.extDirs, ctx));
+        if (extensions.length) {
+          sendLog(`${tool.name}：发现 ${extensions.length} 个扩展。`, 'backup');
+          records.push({ i, kind: 'editorExtensions', cli: tool.cli, extensions });
         }
-        fs.readdirSync(claudeSrc).forEach(file => {
-          if (excludes.includes(file)) return;
-          copyDirRecursive(pathMod.join(claudeSrc, file), pathMod.join(claudeDest, file));
-        });
+      }
 
-        const globalConfigSrc = getClaudeConfigPath();
-        if (fs.existsSync(globalConfigSrc)) {
-          sendLog('Backing up Claude Code global config & MCP servers (.claude.json)...', 'backup');
-          fs.copyFileSync(globalConfigSrc, pathMod.join(sessionTempDir, 'claude.json'));
-        }
-
-        getClaudeDesktopConfigs().filter(i => fs.existsSync(i.path)).forEach(item => {
-          sendLog(`Backing up Claude Desktop config for ${item.name}...`, 'backup');
-          fs.copyFileSync(item.path, pathMod.join(sessionTempDir, `claude_desktop_${item.name}.json`));
-        });
-
-        manifest.contents.claude = true;
-        sendLog('Claude Code data staged.', 'backup');
+      if (records.length) {
+        if (secretStaged) { manifest.includesSecrets = true; sendLog(`注意：${tool.name} 备份含明文私密数据，请妥善保管压缩包。`, 'warning'); }
+        manifest.tools.push({ id: tool.id, name: tool.name, category: tool.category, secret: !!tool.secret, items: records });
+        sendLog(`${tool.name} 已暂存。`, 'backup');
       }
     }
 
-    // --- Editors: VS Code + Antigravity IDE ---
-    for (const editor of getEditors()) {
-      if (!editorIds.includes(editor.id)) continue;
-      sendLog(`Backing up ${editor.name} settings & extensions...`, 'backup');
-      const editorDestRoot = pathMod.join(sessionTempDir, 'editors', editor.id);
-      const userIndices = [];
-
-      editor.userPaths.forEach((userPath, idx) => {
-        if (!fs.existsSync(userPath)) return;
-        const dest = pathMod.join(editorDestRoot, `user_${idx}`);
-        let copiedAny = false;
-        EDITOR_USER_ITEMS.forEach(item => {
-          const itemPath = pathMod.join(userPath, item);
-          if (fs.existsSync(itemPath)) {
-            copyDirRecursive(itemPath, pathMod.join(dest, item));
-            copiedAny = true;
-          }
-        });
-        if (copiedAny) userIndices.push(idx);
-      });
-
-      const extensions = await listEditorExtensions(editor);
-      if (extensions.length) sendLog(`Found ${extensions.length} ${editor.name} extensions.`, 'backup');
-
-      // Antigravity argv.json (per-IDE launch args) travels with the IDE.
-      if (editor.id === 'antigravity-ide' && fs.existsSync(getAntigravityArgvPath())) {
-        copyDirRecursive(getAntigravityArgvPath(), pathMod.join(editorDestRoot, 'argv.json'));
-      }
-
-      if (userIndices.length || extensions.length) {
-        manifest.contents.editors.push({ id: editor.id, name: editor.name, userIndices, extensions });
-        sendLog(`${editor.name} staged.`, 'backup');
-      }
-    }
-
-    // --- Antigravity / Gemini CLI ---
-    if (includeGemini) {
-      sendLog('Backing up Antigravity / Gemini CLI configurations (~/.gemini)...', 'backup');
-      const geminiSrc = getGeminiPath();
-      const geminiDest = pathMod.join(sessionTempDir, 'gemini');
-      if (fs.existsSync(geminiSrc)) {
-        fs.mkdirSync(geminiDest, { recursive: true });
-        fs.readdirSync(geminiSrc).forEach(file => {
-          if (GEMINI_EXCLUDES.includes(file)) return;
-          copyDirRecursive(pathMod.join(geminiSrc, file), pathMod.join(geminiDest, file), GEMINI_EXCLUDES);
-        });
-        manifest.contents.gemini = true;
-        sendLog('Gemini CLI configurations staged.', 'backup');
-      }
-    }
-
-    // --- SSH keys ---
-    if (includeSSH) {
-      const sshSrc = getSshPath();
-      if (fs.existsSync(sshSrc)) {
-        sendLog('Backing up SSH keys (~/.ssh)...', 'backup');
-        copyDirRecursive(sshSrc, pathMod.join(sessionTempDir, 'ssh'));
-        manifest.contents.ssh = true;
-        manifest.includesCredentials = true;
-        sendLog('WARNING: backup contains private SSH keys. Keep the archive private.', 'warning');
-      }
-    }
-
-    // --- Global gitconfig ---
-    if (includeGitconfig && fs.existsSync(getGitconfigPath())) {
-      sendLog('Backing up global .gitconfig...', 'backup');
-      fs.copyFileSync(getGitconfigPath(), pathMod.join(sessionTempDir, 'gitconfig'));
-      manifest.contents.gitconfig = true;
-    }
-
-    // --- Custom workspaces ---
-    if (customWorkspaces && customWorkspaces.length > 0) {
-      const workspacesDest = pathMod.join(sessionTempDir, 'workspaces');
-      fs.mkdirSync(workspacesDest, { recursive: true });
+    // 自定义工作区
+    if (customWorkspaces && customWorkspaces.length) {
+      const wsDest = pathMod.join(sessionTempDir, 'workspaces');
+      fs.mkdirSync(wsDest, { recursive: true });
       for (const wPath of customWorkspaces) {
         if (fs.existsSync(wPath)) {
           const folderName = pathMod.basename(wPath);
-          sendLog(`Staging workspace directory: ${folderName} (${wPath})`, 'backup');
-          copyDirRecursive(wPath, pathMod.join(workspacesDest, folderName),
-            ['node_modules', '.git', 'dist', 'build', '.next', '.codegraph']);
-          manifest.contents.workspaces.push({ originalPath: wPath, folderName });
-        } else {
-          sendLog(`Workspace directory not found: ${wPath}`, 'warning');
-        }
+          sendLog(`正在暂存工作区目录：${folderName}（${wPath}）`, 'backup');
+          copyDirRecursive(wPath, pathMod.join(wsDest, folderName), ['node_modules', '.git', 'dist', 'build', '.next', '.codegraph']);
+          manifest.workspaces.push({ originalPath: wPath, folderName });
+        } else sendLog(`工作区目录不存在：${wPath}`, 'warning');
       }
     }
 
     fs.writeFileSync(pathMod.join(sessionTempDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     await zipDirectory(sessionTempDir, finalZipPath);
-
-    sendLog('Cleaning up temporary workspace files...', 'system');
+    sendLog('正在清理临时文件…', 'system');
     fs.rmSync(sessionTempDir, { recursive: true, force: true });
-    sendLog(`Backup completed! Save path: ${finalZipPath}`, 'success');
-
+    sendLog(`备份完成！保存路径：${finalZipPath}`, 'success');
     res.json({ success: true, filename: pathMod.basename(finalZipPath), size: fs.statSync(finalZipPath).size, time: manifest.backupTime });
   } catch (e) {
-    sendLog(`Backup failed: ${e.message}`, 'error');
+    sendLog(`备份失败：${e.message}`, 'error');
     if (fs.existsSync(sessionTempDir)) fs.rmSync(sessionTempDir, { recursive: true, force: true });
     res.status(500).json({ error: e.message });
   }
 });
 
 // ---------------------------------------------------------------------------
-// 4. Upload backup & parse manifest
+// 4. 上传备份并解析 manifest
 // ---------------------------------------------------------------------------
 let activeRestoreSession = null;
 
 app.post('/api/restore-upload', upload.single('backupFile'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  if (!req.file) return res.status(400).json({ error: '未上传文件' });
   const fileInfo = req.file;
   const restoreTempPath = pathMod.join(tempDir, `restore_${Date.now()}`);
   try {
     fs.mkdirSync(restoreTempPath, { recursive: true });
     await unzipDirectory(fileInfo.path, restoreTempPath);
-
     const manifestPath = pathMod.join(restoreTempPath, 'manifest.json');
     if (!fs.existsSync(manifestPath)) {
       fs.rmSync(restoreTempPath, { recursive: true, force: true });
       fs.unlinkSync(fileInfo.path);
-      return res.status(400).json({ error: 'Invalid backup file: manifest.json is missing.' });
+      return res.status(400).json({ error: '无效备份文件：缺少 manifest.json。' });
     }
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     activeRestoreSession = { tempPath: restoreTempPath, zipPath: fileInfo.path, manifest };
     res.json({ success: true, manifest });
   } catch (e) {
-    sendLog(`Failed to parse restore upload: ${e.message}`, 'error');
+    sendLog(`解析上传备份失败：${e.message}`, 'error');
     if (fs.existsSync(restoreTempPath)) fs.rmSync(restoreTempPath, { recursive: true, force: true });
     if (fs.existsSync(fileInfo.path)) fs.unlinkSync(fileInfo.path);
     res.status(500).json({ error: e.message });
@@ -601,215 +455,157 @@ app.post('/api/restore-upload', upload.single('backupFile'), async (req, res) =>
 });
 
 // ---------------------------------------------------------------------------
-// 5. Confirm & execute restore (non-destructive)
+// 5. 确认还原（非破坏式）
 // ---------------------------------------------------------------------------
-function snapshotExisting(snapshotDir) {
-  // Copy the target machine's current config so the user can roll back.
-  sendLog(`Snapshotting existing target config to ${pathMod.basename(snapshotDir)}/ before restore...`, 'system');
-  const targets = [];
-  if (fs.existsSync(getClaudePath())) targets.push({ src: getClaudePath(), dest: 'claude' });
-  if (fs.existsSync(getClaudeConfigPath())) targets.push({ src: getClaudeConfigPath(), dest: 'claude.json' });
-  if (fs.existsSync(getGeminiPath())) targets.push({ src: getGeminiPath(), dest: 'gemini' });
-  if (fs.existsSync(getGitconfigPath())) targets.push({ src: getGitconfigPath(), dest: 'gitconfig' });
-  getClaudeDesktopConfigs().filter(i => fs.existsSync(i.path)).forEach(i => targets.push({ src: i.path, dest: `claude_desktop_${i.name}.json` }));
-  getEditors().forEach(ed => ed.userPaths.forEach((p, idx) => {
-    if (fs.existsSync(p)) targets.push({ src: p, dest: pathMod.join('editors', ed.id, `user_${idx}`) });
-  }));
-
-  const heavy = ['cache', 'downloads', 'paste-cache', 'telemetry', 'workspaceStorage', 'globalStorage', 'History', 'node_modules'];
-  targets.forEach(t => {
-    try { copyDirRecursive(t.src, pathMod.join(snapshotDir, t.dest), heavy); }
-    catch (e) { sendLog(`Snapshot skipped ${t.dest}: ${e.message}`, 'warning'); }
+function snapshotExisting(snapshotDir, manifest, ctx) {
+  sendLog(`还原前先把目标机现有配置快照到 ${pathMod.basename(snapshotDir)}/…`, 'system');
+  const toolMap = {}; TOOLS.forEach(t => { toolMap[t.id] = t; });
+  (manifest.tools || []).forEach(saved => {
+    const tool = toolMap[saved.id];
+    if (!tool) return;
+    tool.items.forEach((item, i) => {
+      if (item.kind === 'editorExtensions') return;
+      if (item.kind === 'extAgent') {
+        extAgentHosts(item.extId, ctx).forEach(h => {
+          try { copyDirRecursive(h.dir, pathMod.join(snapshotDir, saved.id, `${h.editorId}__user_${h.userIndex}`), SIZE_EXCLUDES); } catch (e) {}
+        });
+        return;
+      }
+      itemSources(item, ctx).forEach((p, j) => {
+        if (!pathExists(p)) return;
+        try { copyDirRecursive(p, pathMod.join(snapshotDir, saved.id, `item_${i}_src_${j}`), SIZE_EXCLUDES); } catch (e) {}
+      });
+    });
   });
 }
 
 app.post('/api/restore-confirm', async (req, res) => {
-  if (!activeRestoreSession) return res.status(400).json({ error: 'No active restore session. Upload the zip file first.' });
+  if (!activeRestoreSession) return res.status(400).json({ error: '没有进行中的还原会话，请先上传 zip。' });
   const { pathMapping } = req.body;
   const { tempPath, zipPath, manifest } = activeRestoreSession;
-  const c = manifest.contents;
-  const skippedNotes = [];
+  const ctx = buildCtx();
+  const toolMap = {}; TOOLS.forEach(t => { toolMap[t.id] = t; });
+  const notes = [];
 
   try {
-    sendLog('Initiating non-destructive restoration...', 'system');
-
-    // Snapshot current target config for rollback.
+    sendLog('开始非破坏式还原…', 'system');
     const snapshotDir = pathMod.join(backupsDir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`);
-    snapshotExisting(snapshotDir);
+    snapshotExisting(snapshotDir, manifest, ctx);
 
-    // Build the full set of old->new mappings: per-workspace mappings plus an
-    // implicit home-dir remap so untracked project histories also resolve.
+    // 全局路径映射：用户填的 + 隐式 sourceHome→目标home
     const mappings = {};
     Object.keys(pathMapping || {}).forEach(k => { if (pathMapping[k]) mappings[k] = pathMapping[k]; });
-    if (manifest.sourceHome && manifest.sourceHome !== os.homedir()) {
-      mappings[manifest.sourceHome] = os.homedir();
-    }
+    if (manifest.sourceHome && manifest.sourceHome !== os.homedir()) mappings[manifest.sourceHome] = os.homedir();
 
-    // --- Workspaces (skip-existing so target files are never clobbered) ---
-    if (c.workspaces && c.workspaces.length) {
-      for (const w of c.workspaces) {
-        const targetPath = (pathMapping || {})[w.originalPath];
-        if (!targetPath) { sendLog(`Skipping workspace ${w.folderName} (no path mapped).`, 'restore'); continue; }
-        const sourceFolder = pathMod.join(tempPath, 'workspaces', w.folderName);
-        if (fs.existsSync(sourceFolder)) {
-          sendLog(`Restoring workspace ${w.folderName} -> ${targetPath} (existing files preserved)`, 'restore');
-          copyDirSkipExisting(sourceFolder, targetPath);
-        }
-      }
-    }
+    // 工作区（跳过已存在，绝不覆盖）
+    (manifest.workspaces || []).forEach(w => {
+      const target = (pathMapping || {})[w.originalPath];
+      if (!target) { sendLog(`跳过工作区 ${w.folderName}（未配置映射）。`, 'restore'); return; }
+      const srcFolder = pathMod.join(tempPath, 'workspaces', w.folderName);
+      if (fs.existsSync(srcFolder)) { sendLog(`还原工作区 ${w.folderName} → ${target}（保留已有文件）`, 'restore'); copyDirSkipExisting(srcFolder, target); }
+    });
 
-    // --- Claude Code CLI ---
-    if (c.claude) {
-      sendLog('Restoring Claude Code configurations and history...', 'restore');
-      const claudeDest = getClaudePath();
-      const claudeSource = pathMod.join(tempPath, 'claude');
-      if (!fs.existsSync(claudeDest)) fs.mkdirSync(claudeDest, { recursive: true });
+    // 各工具
+    for (const saved of (manifest.tools || [])) {
+      const tool = toolMap[saved.id];
+      if (!tool) { sendLog(`备份含未知工具 ${saved.id}，跳过。`, 'warning'); continue; }
+      sendLog(`正在还原：${saved.name}…`, 'restore');
+      const toolDir = pathMod.join(tempPath, 'tools', saved.id);
 
-      // Everything except projects/, copied without overwriting existing files.
-      fs.readdirSync(claudeSource).forEach(item => {
-        if (item === 'projects') return;
-        copyDirSkipExisting(pathMod.join(claudeSource, item), pathMod.join(claudeDest, item));
-      });
+      for (const rec of saved.items) {
+        const item = tool.items[rec.i];
+        if (!item) continue;
+        const itemDir = pathMod.join(toolDir, `item_${rec.i}`);
 
-      // Global .claude.json (MCP servers) -> path-rewrite then merge target-wins.
-      const backedConfig = pathMod.join(tempPath, 'claude.json');
-      if (fs.existsSync(backedConfig)) {
-        sendLog('Merging Claude Code global config & MCP servers (.claude.json)...', 'restore');
-        const rewritten = rewritePaths(fs.readFileSync(backedConfig, 'utf8'), mappings);
-        mergeJsonIntoTarget(rewritten, getClaudeConfigPath());
-      }
-
-      // Claude Desktop configs -> path-rewrite then merge target-wins.
-      getClaudeDesktopConfigs().forEach(dest => {
-        const backedDesk = pathMod.join(tempPath, `claude_desktop_${dest.name}.json`);
-        if (fs.existsSync(backedDesk)) {
-          sendLog(`Merging Claude Desktop config for ${dest.name}...`, 'restore');
-          const rewritten = rewritePaths(fs.readFileSync(backedDesk, 'utf8'), mappings);
-          mergeJsonIntoTarget(rewritten, dest.path);
-        }
-      });
-
-      // Projects: remap folder keys + rewrite in-file paths, skip-existing.
-      restoreProjects(pathMod.join(claudeSource, 'projects'), pathMod.join(claudeDest, 'projects'), mappings, c.workspaces || [], pathMapping || {});
-      sendLog('Claude Code data restored.', 'success');
-    }
-
-    // --- Editors: VS Code + Antigravity IDE ---
-    if (c.editors && c.editors.length) {
-      const editorMap = {};
-      getEditors().forEach(e => { editorMap[e.id] = e; });
-      for (const saved of c.editors) {
-        const editor = editorMap[saved.id];
-        if (!editor) { sendLog(`Unknown editor in backup: ${saved.id}, skipped.`, 'warning'); continue; }
-        sendLog(`Restoring ${saved.name} settings & extensions...`, 'restore');
-
-        (saved.userIndices || []).forEach(idx => {
-          const srcUser = pathMod.join(tempPath, 'editors', saved.id, `user_${idx}`);
-          const destUser = editor.userPaths[idx];
-          if (!fs.existsSync(srcUser) || !destUser) return;
-          EDITOR_USER_ITEMS.forEach(item => {
-            const srcItem = pathMod.join(srcUser, item);
-            if (!fs.existsSync(srcItem)) return;
-            if (item === 'settings.json') {
-              mergeJsonIntoTarget(fs.readFileSync(srcItem, 'utf8'), pathMod.join(destUser, item));
-            } else {
-              // keybindings.json (array) and snippets: skip-if-exists.
-              copyDirSkipExisting(srcItem, pathMod.join(destUser, item));
+        if (rec.kind === 'editorExtensions') {
+          installMissingExtensions(rec.cli || tool.cli, saved.name, rec.extensions || []);
+        } else if (rec.kind === 'extAgent') {
+          (rec.hosts || []).forEach(h => {
+            const ed = toolMap[h.editorId];
+            if (!ed) return;
+            const userPath = resolve(ed.userPaths, ctx)[h.userIndex];
+            if (!userPath) return;
+            const src = pathMod.join(itemDir, `${h.editorId}__user_${h.userIndex}`);
+            if (fs.existsSync(src)) copyDirSkipExisting(src, pathMod.join(userPath, 'globalStorage', rec.extId));
+          });
+        } else if (rec.kind === 'claudeProjects') {
+          restoreProjects(pathMod.join(itemDir, 'projects'), pathMod.join(os.homedir(), '.claude', 'projects'), mappings, manifest.workspaces || [], pathMapping || {});
+        } else if (rec.kind === 'editorUser') {
+          const targets = itemSources(item, ctx);
+          (rec.srcIndices || []).forEach(j => {
+            const srcUser = pathMod.join(itemDir, `src_${j}`);
+            const destUser = targets[j];
+            if (!fs.existsSync(srcUser) || !destUser) return;
+            EDITOR_USER_ITEMS.forEach(it => {
+              const s = pathMod.join(srcUser, it);
+              if (!fs.existsSync(s)) return;
+              if (it === 'settings.json') mergeJsonIntoTarget(fs.readFileSync(s, 'utf8'), pathMod.join(destUser, it));
+              else copyDirSkipExisting(s, pathMod.join(destUser, it));
+            });
+          });
+        } else if (rec.kind === 'dir') {
+          const targets = itemSources(item, ctx);
+          (rec.srcIndices || []).forEach(j => {
+            const s = pathMod.join(itemDir, `src_${j}`);
+            if (fs.existsSync(s) && targets[j]) copyDirSkipExisting(s, targets[j]);
+          });
+        } else if (rec.kind === 'file') {
+          const targets = itemSources(item, ctx);
+          (rec.srcIndices || []).forEach(j => {
+            const s = pathMod.join(itemDir, `file_${j}`);
+            if (fs.existsSync(s) && targets[j] && !fs.existsSync(targets[j])) {
+              const parent = pathMod.dirname(targets[j]);
+              if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
+              fs.copyFileSync(s, targets[j]);
+            } else if (targets[j] && fs.existsSync(targets[j])) {
+              notes.push(`${saved.name}: ${pathMod.basename(targets[j])} 目标机已存在，保留未覆盖。`);
             }
           });
-        });
-
-        const argvSrc = pathMod.join(tempPath, 'editors', saved.id, 'argv.json');
-        if (saved.id === 'antigravity-ide' && fs.existsSync(argvSrc)) {
-          copyDirSkipExisting(argvSrc, getAntigravityArgvPath());
-        }
-
-        installEditorExtensions(editor, saved.extensions || []);
-      }
-    }
-
-    // --- Antigravity / Gemini CLI ---
-    if (c.gemini) {
-      sendLog('Restoring Antigravity / Gemini CLI configurations...', 'restore');
-      const geminiDest = getGeminiPath();
-      const geminiSource = pathMod.join(tempPath, 'gemini');
-      if (fs.existsSync(geminiSource)) {
-        if (!fs.existsSync(geminiDest)) fs.mkdirSync(geminiDest, { recursive: true });
-        fs.readdirSync(geminiSource).forEach(item => {
-          if (item === 'projects.json') return; // merged separately below
-          copyDirSkipExisting(pathMod.join(geminiSource, item), pathMod.join(geminiDest, item), GEMINI_EXCLUDES);
-        });
-        const projectsJsonSrc = pathMod.join(geminiSource, 'projects.json');
-        if (fs.existsSync(projectsJsonSrc)) {
-          const rewritten = rewritePaths(fs.readFileSync(projectsJsonSrc, 'utf8'), mappings);
-          mergeJsonIntoTarget(rewritten, pathMod.join(geminiDest, 'projects.json'));
-        }
-        sendLog('Gemini CLI configurations restored.', 'success');
-      }
-    }
-
-    // --- SSH keys (never overwrite an existing key/known_hosts) ---
-    if (c.ssh) {
-      const sshSource = pathMod.join(tempPath, 'ssh');
-      if (fs.existsSync(sshSource)) {
-        sendLog('Restoring SSH keys (existing files preserved)...', 'restore');
-        copyDirSkipExisting(sshSource, getSshPath());
-        skippedNotes.push('SSH keys restored to ~/.ssh. On macOS/Linux run: chmod 600 ~/.ssh/* on private keys.');
-      }
-    }
-
-    // --- Global gitconfig (skip if target already has one) ---
-    if (c.gitconfig) {
-      const gitSrc = pathMod.join(tempPath, 'gitconfig');
-      if (fs.existsSync(gitSrc)) {
-        if (fs.existsSync(getGitconfigPath())) {
-          skippedNotes.push('~/.gitconfig already existed on this machine and was left untouched. Compare manually if needed.');
-          sendLog('~/.gitconfig exists on target; preserved.', 'restore');
-        } else {
-          fs.copyFileSync(gitSrc, getGitconfigPath());
-          sendLog('Global .gitconfig restored.', 'restore');
+        } else if (rec.kind === 'jsonMerge') {
+          const targets = itemSources(item, ctx);
+          (rec.srcIndices || []).forEach(j => {
+            const s = pathMod.join(itemDir, `json_${j}`);
+            if (!fs.existsSync(s) || !targets[j]) return;
+            let content = fs.readFileSync(s, 'utf8');
+            if (rec.rewrite) content = rewritePaths(content, mappings);
+            mergeJsonIntoTarget(content, targets[j]);
+          });
         }
       }
+      sendLog(`${saved.name} 已还原。`, 'success');
     }
 
-    writeMigrationNotes(manifest, snapshotDir, skippedNotes);
+    writeMigrationNotes(manifest, snapshotDir, notes);
 
-    sendLog('Cleaning up restore cache...', 'system');
+    sendLog('正在清理还原缓存…', 'system');
     fs.rmSync(tempPath, { recursive: true, force: true });
     if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
     activeRestoreSession = null;
-
-    sendLog('Restoration completed (non-destructive).', 'success');
+    sendLog('还原完成（非破坏式）。', 'success');
     res.json({ success: true, snapshot: snapshotDir });
   } catch (e) {
-    sendLog(`Restoration failed: ${e.message}`, 'error');
+    sendLog(`还原失败：${e.message}`, 'error');
     res.status(500).json({ error: e.message });
   }
 });
 
-// Restore Claude project folders: remap folder keys + rewrite in-file paths.
+// Claude 项目还原：项目 key 重映射 + 文件内路径重写
 function restoreProjects(projectsSource, projectsDest, mappings, workspaces, pathMapping) {
   if (!fs.existsSync(projectsSource)) return;
   if (!fs.existsSync(projectsDest)) fs.mkdirSync(projectsDest, { recursive: true });
-
-  // Reverse map: project-key -> original absolute path (from workspaces).
   const keyToOriginal = {};
   workspaces.forEach(w => { keyToOriginal[pathToProjectKey(w.originalPath).toLowerCase()] = w.originalPath; });
 
   fs.readdirSync(projectsSource).forEach(oldKey => {
     let newKey = oldKey;
-    // Rename the folder key when its source path is being remapped.
     const original = keyToOriginal[oldKey.toLowerCase()];
     if (original && pathMapping[original]) {
       newKey = pathToProjectKey(pathMapping[original]);
-      sendLog(`Mapping Claude project key: ${oldKey} -> ${newKey}`, 'restore');
-    } else if (manifestHomeKeyRemap(oldKey, mappings)) {
-      newKey = manifestHomeKeyRemap(oldKey, mappings);
-      sendLog(`Remapping project key by home dir: ${oldKey} -> ${newKey}`, 'restore');
+      sendLog(`映射 Claude 项目 key：${oldKey} → ${newKey}`, 'restore');
     } else {
-      sendLog(`Untracked Claude project folder kept as-is: ${oldKey}`, 'restore');
+      const remap = homeKeyRemap(oldKey, mappings);
+      if (remap) { newKey = remap; sendLog(`按 home 重映射项目 key：${oldKey} → ${newKey}`, 'restore'); }
     }
-
     const srcPath = pathMod.join(projectsSource, oldKey);
     const dstPath = pathMod.join(projectsDest, newKey);
     copyDirSkipExisting(srcPath, dstPath);
@@ -817,8 +613,7 @@ function restoreProjects(projectsSource, projectsDest, mappings, workspaces, pat
   });
 }
 
-// If a project key embeds the source home dir, rewrite it to the target home key.
-function manifestHomeKeyRemap(oldKey, mappings) {
+function homeKeyRemap(oldKey, mappings) {
   for (const oldPath of Object.keys(mappings)) {
     const oldPk = pathToProjectKey(oldPath);
     if (oldKey.toLowerCase().startsWith(oldPk.toLowerCase())) {
@@ -828,22 +623,17 @@ function manifestHomeKeyRemap(oldKey, mappings) {
   return null;
 }
 
-// Rewrite path references inside a project's session logs and memory files.
 function rewriteProjectFiles(dir, mappings) {
   if (!Object.keys(mappings).length) return;
   fs.readdirSync(dir).forEach(file => {
     const filePath = pathMod.join(dir, file);
-    let stats;
-    try { stats = fs.statSync(filePath); } catch (e) { return; }
-
-    if (stats.isDirectory() && file === 'memory') {
-      fs.readdirSync(filePath).forEach(memFile => {
-        const memPath = pathMod.join(filePath, memFile);
-        if (fs.statSync(memPath).isFile() && memFile.endsWith('.md')) {
-          fs.writeFileSync(memPath, rewritePaths(fs.readFileSync(memPath, 'utf8'), mappings), 'utf8');
-        }
+    let st; try { st = fs.statSync(filePath); } catch (e) { return; }
+    if (st.isDirectory() && file === 'memory') {
+      fs.readdirSync(filePath).forEach(mf => {
+        const mp = pathMod.join(filePath, mf);
+        if (fs.statSync(mp).isFile() && mf.endsWith('.md')) fs.writeFileSync(mp, rewritePaths(fs.readFileSync(mp, 'utf8'), mappings), 'utf8');
       });
-    } else if (stats.isFile() && file.endsWith('.jsonl')) {
+    } else if (st.isFile() && file.endsWith('.jsonl')) {
       const lines = fs.readFileSync(filePath, 'utf8').split('\n').map(line => {
         if (!line.trim()) return line;
         try {
@@ -858,67 +648,48 @@ function rewriteProjectFiles(dir, mappings) {
             }
           });
           return JSON.stringify(obj);
-        } catch (e) {
-          return rewritePaths(line, mappings);
-        }
+        } catch (e) { return rewritePaths(line, mappings); }
       });
       fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
     }
   });
 }
 
-// Install only extensions the target editor is missing.
-function installEditorExtensions(editor, wanted) {
-  if (!wanted.length) return;
-  exec(`${editor.cli} --list-extensions`, (err, stdout) => {
+function installMissingExtensions(cli, name, wanted) {
+  if (!wanted.length || !cli) return;
+  exec(`${cli} --list-extensions`, (err, stdout) => {
     const installed = (!err && stdout) ? new Set(stdout.split('\n').map(x => x.trim().toLowerCase()).filter(Boolean)) : new Set();
-    const missing = wanted.filter(ext => !installed.has(ext.toLowerCase()));
-    if (!missing.length) { sendLog(`${editor.name}: all ${wanted.length} extensions already installed.`, 'restore'); return; }
-    sendLog(`${editor.name}: installing ${missing.length} missing extensions via '${editor.cli}'...`, 'restore');
-    missing.forEach(ext => {
-      exec(`${editor.cli} --install-extension ${ext}`, (e) => {
-        if (e) sendLog(`${editor.name}: failed to install ${ext} (CLI '${editor.cli}' unreachable?).`, 'warning');
-        else sendLog(`${editor.name}: installed ${ext}`, 'restore');
-      });
-    });
+    const missing = wanted.filter(e => !installed.has(e.toLowerCase()));
+    if (!missing.length) { sendLog(`${name}：${wanted.length} 个扩展已全部安装。`, 'restore'); return; }
+    sendLog(`${name}：通过 '${cli}' 安装缺失的 ${missing.length} 个扩展…`, 'restore');
+    missing.forEach(ext => exec(`${cli} --install-extension ${ext}`, e =>
+      sendLog(e ? `${name}：安装 ${ext} 失败（CLI '${cli}' 不可用？）。` : `${name}：已安装 ${ext}`, e ? 'warning' : 'restore')));
   });
 }
 
-// Write a human-readable checklist of what could not be migrated automatically.
-function writeMigrationNotes(manifest, snapshotDir, skippedNotes) {
+function writeMigrationNotes(manifest, snapshotDir, notes) {
   const lines = [];
-  lines.push('BridgeSync Migration Notes');
-  lines.push('==========================');
-  lines.push(`Restored: ${new Date().toISOString()}`);
-  lines.push(`Source: ${manifest.sourceHost} (${manifest.sourceUser}, ${manifest.sourceOS})`);
-  lines.push(`Pre-restore snapshot of THIS machine's previous config: ${snapshotDir}`);
+  lines.push('BridgeSync 迁移说明');
+  lines.push('====================');
+  lines.push(`还原时间：${new Date().toISOString()}`);
+  lines.push(`来源：${manifest.sourceHost}（${manifest.sourceUser}，${manifest.sourceOS}）`);
+  lines.push(`本机原配置的快照（可回滚）：${snapshotDir}`);
   lines.push('');
-  lines.push('Restore was NON-DESTRUCTIVE: existing files on this machine were kept;');
-  lines.push('JSON configs were merged with your existing values winning on conflicts.');
+  lines.push('本次还原为非破坏式：目标机已有文件保留，JSON 合并且你的现有值优先。');
   lines.push('');
-  if (skippedNotes.length) {
-    lines.push('Notes from this restore:');
-    skippedNotes.forEach(n => lines.push(`  - ${n}`));
-    lines.push('');
-  }
-  lines.push('Manual steps NOT handled automatically:');
-  lines.push('  - Install runtimes/CLIs: Node.js, VS Code `code` CLI, Antigravity `antigravity` CLI, gh.');
-  lines.push('  - Install RTK (rtk) and re-enable its Claude Code hook if you use it.');
-  lines.push('  - Rebuild per-project CodeGraph indexes (.codegraph was excluded): run `codegraph init -i`.');
-  lines.push('  - Re-login where tokens were not migrated (Claude Code/Desktop, extension auth, gh auth login).');
-  lines.push('  - Editor globalStorage/workspaceStorage were NOT migrated (machine/path-specific).');
-  if (manifest.includesCredentials) {
-    lines.push('  - This backup contained secrets (credentials/SSH keys). Delete the .zip when done.');
-  }
+  if (notes.length) { lines.push('本次提示：'); notes.forEach(n => lines.push(`  - ${n}`)); lines.push(''); }
+  lines.push('需要手动处理（工具本身不随备份迁移）：');
+  lines.push('  - 安装运行时/CLI：Node.js、各编辑器的命令行（code / cursor / windsurf / antigravity 等）、gh。');
+  lines.push('  - rtk：拷贝 rtk 二进制并加入 PATH。');
+  lines.push('  - codegraph：npm install -g @colbymchenry/codegraph，每个项目 codegraph init -i 重建索引。');
+  lines.push('  - 未迁移登录态的工具需重新登录（Claude、扩展、gh auth login 等）。');
+  lines.push('  - 编辑器 globalStorage/workspaceStorage 未迁移（与机器/路径绑定）。');
+  if (manifest.includesSecrets) lines.push('  - 本备份含私密数据（凭证/SSH 密钥等），用完请删除 .zip。');
   const notesPath = pathMod.join(os.homedir(), 'BridgeSync-MIGRATION-NOTES.txt');
-  try {
-    fs.writeFileSync(notesPath, lines.join('\n'), 'utf8');
-    sendLog(`Migration notes written to: ${notesPath}`, 'success');
-  } catch (e) {
-    sendLog(`Could not write migration notes: ${e.message}`, 'warning');
-  }
+  try { fs.writeFileSync(notesPath, lines.join('\n'), 'utf8'); sendLog(`迁移说明已写入：${notesPath}`, 'success'); }
+  catch (e) { sendLog(`写入迁移说明失败：${e.message}`, 'warning'); }
 }
 
 app.listen(port, '127.0.0.1', () => {
-  console.log(`BridgeSync local backend listening at http://127.0.0.1:${port}`);
+  console.log(`BridgeSync 本地后端已启动：http://127.0.0.1:${port}`);
 });
