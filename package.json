@@ -1,20 +1,23 @@
 {
   "name": "claude-vscode-backup-tool",
   "version": "1.0.0",
-  "description": "BridgeSync: Claude Code & VS Code Backup & Migration Tool",
+  "description": "BridgeSync: 各类 AI 编码工具的配置/会话/密钥备份与非破坏式迁移工具",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "keywords": [
     "claude",
+    "cursor",
+    "windsurf",
     "vscode",
+    "ai-agent",
     "backup",
     "migration",
     "sync"
   ],
-  "author": "Antigravity",
-  "license": "ISC",
+  "author": "RocGP",
+  "license": "MIT",
   "dependencies": {
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1"

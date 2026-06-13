@@ -72,4 +72,4 @@ extAgentTool({ id: 'cline', name: 'Cline', extId: 'saoudrizwan.claude-dev', excl
 
 ## 许可
 
-ISC
+[MIT](LICENSE)
